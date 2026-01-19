@@ -6,12 +6,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import shutil
+import platform
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 DOCKER_PLATFORM = "linux/amd64"
-MAX_SUBJECTS_TO_PROCESS = -1 # Cap processing to this many unique subject/visit sessions
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -23,11 +23,7 @@ def parse_filename(filepath):
     Returns (subject_id, visit_id, run_num) or None if parsing fails.
     """
     name = filepath.name
-    # Regex to capture ID (C or P followed by digits), Visit (V followed by digits)
-    # and optional run (run- followed by digits)
-    # Examples: 
-    # CALSNIC2_EDM_C005_T1w10_V1.nii.gz
-    # CALSNIC2_EDM_P108_T1w10_V1_run-02.nii.gz
+
     
     match = re.search(r'_([CP]\d+)_', name)
     if not match:
@@ -95,10 +91,18 @@ def run_docker_synthstrip(input_path, mask_path, host_folder):
     container_input = f"/data/{input_path.name}"
     container_mask = f"/data/{mask_path.name}"
 
+    # Handle Windows paths for Docker volume mount
+    host_folder_str = str(host_folder.resolve())
+    if platform.system() == "Windows":
+        # Docker on Windows often prefers forward slashes or /c/Users style, 
+        # but modern Docker Desktop often accepts C:/Users style.
+        # Replacing \ with / is usually a safe bet.
+        host_folder_str = host_folder_str.replace('\\', '/')
+
     cmd = [
         "docker", "run", "--rm",
         "--platform", DOCKER_PLATFORM,
-        "-v", f"{host_folder}:/data",
+        "-v", f"{host_folder_str}:/data",
         "freesurfer/synthstrip",
         "-i", container_input,
         "-m", container_mask,
@@ -131,6 +135,23 @@ def generate_qc_snapshot(t1, t2, flair, mask, filename):
     plt.tight_layout()
     plt.savefig(filename, dpi=100)
     plt.close()
+
+def is_subject_processed(subj_id, visit_id, output_dir):
+    """Checks if a subject has already been processed."""
+    subj_folder_name = f"{subj_id}_{visit_id}"
+    subj_out_dir = output_dir / subj_folder_name
+    
+    if not subj_out_dir.exists():
+        return False
+        
+    expected_files = [
+        subj_out_dir / f"{subj_id}_{visit_id}_T1.nii.gz",
+        subj_out_dir / f"{subj_id}_{visit_id}_T2.nii.gz",
+        subj_out_dir / f"{subj_id}_{visit_id}_FLAIR.nii.gz",
+        subj_out_dir / f"{subj_id}_{visit_id}_mask.nii.gz"
+    ]
+    
+    return all(f.exists() for f in expected_files)
 
 def process_subject(subj_id, visit_id, paths, output_dir, qc_dir):
     t1_info = paths['T1']
@@ -238,18 +259,12 @@ def main():
     processed_dir = data_root / "processed"
     qc_dir = processed_dir / "_QC_Snapshots"
     
-    if processed_dir.exists():
-        print(f"Removing existing processed directory: {processed_dir}")
-        shutil.rmtree(processed_dir)
+    # NOTE: Removed automatic cleanup of processed_dir to support resuming.
     
     # Recreate the main processed directory
     processed_dir.mkdir(parents=True, exist_ok=True)
     
-    # QC directory is inside processed_dir, ensure it's also fresh
-    qc_dir = processed_dir / "_QC_Snapshots" # Redefine here to ensure it's always under the newly created processed_dir
-    if qc_dir.exists(): # This check is somewhat redundant if processed_dir was just removed, but safe.
-        print(f"Removing existing QC snapshots directory: {qc_dir}")
-        shutil.rmtree(qc_dir)
+    # QC directory is inside processed_dir
     qc_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Scanning for files in {raw_dir}...")
@@ -261,40 +276,19 @@ def main():
 
     print(f"Found {len(subjects_dict)} unique subject/visit sessions.")
 
-    control_count = 0
-    patient_count = 0
     total_subjects_found = len(subjects_dict)
     current_processed_total = 0
 
     for (subj, visit), paths in subjects_dict.items():
-        if MAX_SUBJECTS_TO_PROCESS != -1 and current_processed_total >= MAX_SUBJECTS_TO_PROCESS * 2: # Check against actual processed (C+P)
-
-            if control_count >= MAX_SUBJECTS_TO_PROCESS and patient_count >= MAX_SUBJECTS_TO_PROCESS:
-                print(f"Reached cap of {MAX_SUBJECTS_TO_PROCESS} Controls and {MAX_SUBJECTS_TO_PROCESS} Patients. Stopping.")
-                break
-
-        is_control = subj.startswith('C')
-        is_patient = subj.startswith('P')
-
-        # Check Caps
-        if MAX_SUBJECTS_TO_PROCESS != -1:
-            # If we already have enough of this specific type, skip
-            if is_control and control_count >= MAX_SUBJECTS_TO_PROCESS:
-                continue
-            if is_patient and patient_count >= MAX_SUBJECTS_TO_PROCESS:
-                continue
-            
-            # If we have enough of BOTH, stop completely after this check
-            if control_count >= MAX_SUBJECTS_TO_PROCESS and patient_count >= MAX_SUBJECTS_TO_PROCESS:
-                print(f"Reached cap of {MAX_SUBJECTS_TO_PROCESS} Controls and {MAX_SUBJECTS_TO_PROCESS} Patients. Stopping.")
-                break
+        if is_subject_processed(subj, visit, processed_dir):
+             print(f"Skipping {subj}_{visit} (Already Processed) ({current_processed_total + 1}/{total_subjects_found})")
+             current_processed_total += 1
+             continue
 
         print(f"Processing {subj}_{visit} ({current_processed_total + 1}/{total_subjects_found})...")
         process_subject(subj, visit, paths, processed_dir, qc_dir)
         
-        if is_control: control_count += 1
-        if is_patient: patient_count += 1
-        current_processed_total += 1 # Increment for overall progress indication
+        current_processed_total += 1
 
 if __name__ == "__main__":
     main()
