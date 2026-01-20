@@ -15,5 +15,5 @@ class ALSTriStreamClassifier(nn.Module):
 
     # forward pass delegating to the transformer model
     def forward(self, t1, t2, flair):
-        # the model returns the raw logit (score)
+        # the model returns the raw logit
         return self.model(t1, t2, flair)
