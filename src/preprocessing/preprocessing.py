@@ -8,14 +8,9 @@ from pathlib import Path
 import shutil
 import platform
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
 DOCKER_PLATFORM = "linux/amd64"
 
-# ---------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------
+
 
 def parse_filename(filepath):
     """
@@ -94,9 +89,6 @@ def run_docker_synthstrip(input_path, mask_path, host_folder):
     # Handle Windows paths for Docker volume mount
     host_folder_str = str(host_folder.resolve())
     if platform.system() == "Windows":
-        # Docker on Windows often prefers forward slashes or /c/Users style, 
-        # but modern Docker Desktop often accepts C:/Users style.
-        # Replacing \ with / is usually a safe bet.
         host_folder_str = host_folder_str.replace('\\', '/')
 
     cmd = [
@@ -248,9 +240,6 @@ def process_subject(subj_id, visit_id, paths, output_dir, qc_dir):
     except Exception as e:
         print(f"   [!] Error processing {subj_folder_name}: {e}")
 
-# ---------------------------------------------------------
-# Main
-# ---------------------------------------------------------
 def main():
     script_dir = Path(__file__).resolve().parent
     # Data is at ../../Data relative to src/preprossecing
@@ -259,7 +248,7 @@ def main():
     processed_dir = data_root / "processed"
     qc_dir = processed_dir / "_QC_Snapshots"
     
-    # NOTE: Removed automatic cleanup of processed_dir to support resuming.
+
     
     # Recreate the main processed directory
     processed_dir.mkdir(parents=True, exist_ok=True)
