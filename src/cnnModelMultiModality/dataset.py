@@ -35,12 +35,22 @@ class MultiModalALSDataset(Dataset):
             folderName = os.path.basename(folder)
             
             # determine label based on naming convention
-            # starts with 'C' -> control (0), 'P' -> patient (ALS) (1)
-            # example: CALSNIC2_EDM_C005_V1
-            if "_C" in folderName:
+            # folder names are expected to be {SubjectID}_{VisitID} (e.g. C005_V1)
+            # SubjectIDs starting with 'C' are Controls (0.0)
+            # SubjectIDs starting with 'P' are Patients (1.0)
+            
+            # Split folder name to get SubjectID (e.g., "C005" from "C005_V1")
+            parts = folderName.split('_')
+            subject_id = parts[0]
+            
+            if subject_id.startswith("C"):
                 label = 0.0 # Control
-            elif "_P" in folderName:
+            elif subject_id.startswith("P"):
                 label = 1.0 # ALS Patient
+            elif "_C" in folderName: # Fallback for other conventions
+                label = 0.0
+            elif "_P" in folderName: # Fallback
+                label = 1.0
             else:
                 # skip if convention matches neither
                 continue

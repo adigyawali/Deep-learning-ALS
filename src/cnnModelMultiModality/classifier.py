@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .featureExtractor import CascadedMixingTransformer
+from featureExtractor import CascadedMixingTransformer
 
 # this class wraps the modern transformer-based fusion model
 # it provides the interface expected by the training script

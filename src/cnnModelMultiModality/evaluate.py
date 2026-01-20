@@ -13,7 +13,7 @@ from classifier import ALSTriStreamClassifier
 # ---------------------------------------------------------
 DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 DATA_DIR = "../../Data/processed"
-CHECKPOINT_PATH = "./checkpoints/best_model.pth"
+CHECKPOINT_PATH = "../cnn_features/best_model.pth"
 BATCH_SIZE = 1
 
 def evaluateModel():
