@@ -13,7 +13,6 @@ class ResidualBlock3D(nn.Module):
         self.conv2 = nn.Conv3d(outputChannels, outputChannels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm3d(outputChannels)
         
-        # Project identity connection if dimensions differ
         self.downsample = None
         if stride != 1 or inputChannels != outputChannels:
             self.downsample = nn.Sequential(
@@ -39,25 +38,27 @@ class ResidualBlock3D(nn.Module):
         return out
 
 class SingleModalityEncoder(nn.Module):
-    """Extract one compact feature vector from one MRI modality volume."""
+    """Extract one compact feature vector from one MRI modality volume.
+    
+    Reduced from 4 residual blocks to 2 to lower parameter count
+    for small datasets (~340 samples). Added spatial dropout for regularization.
+    """
 
-    def __init__(self):
+    def __init__(self, feature_dim=128):
         super(SingleModalityEncoder, self).__init__()
-        # Initial convolution
         self.pre_conv = nn.Sequential(
             nn.Conv3d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True)
         )
         
-        # Residual blocks for feature extraction
-        # Gradually increase channels and downsample (stride=2)
-        self.layer1 = ResidualBlock3D(32, 32)
-        self.layer2 = ResidualBlock3D(32, 64, stride=2)
-        self.layer3 = ResidualBlock3D(64, 128, stride=2)
-        self.layer4 = ResidualBlock3D(128, 256, stride=2)
+        # Reduced: 2 residual blocks instead of 4
+        self.layer1 = ResidualBlock3D(32, 64, stride=2)
+        self.layer2 = ResidualBlock3D(64, feature_dim, stride=2)
         
-        # Global pooling to flatten 3D maps to vector
+        # Spatial dropout for 3D feature maps (regularization)
+        self.dropout = nn.Dropout3d(p=0.3)
+        
         self.globalPool = nn.AdaptiveAvgPool3d(1)
 
     def forward(self, x):
@@ -65,8 +66,7 @@ class SingleModalityEncoder(nn.Module):
         
         x = self.layer1(x)
         x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x = self.dropout(x)
         
         return torch.flatten(self.globalPool(x), 1)
 
@@ -74,21 +74,24 @@ class SingleModalityEncoder(nn.Module):
 class CascadedMixingTransformer(nn.Module):
     """Three-branch encoder + transformer mixer + binary classification head."""
 
-    def __init__(self, feature_dim=256, num_classes=2, dropout_prob=0.2):
+    def __init__(self, feature_dim=128, num_classes=2, dropout_prob=0.2):
         super(CascadedMixingTransformer, self).__init__()
         
         # Independent encoders per modality
-        self.t1Encoder = SingleModalityEncoder()
-        self.t2Encoder = SingleModalityEncoder()
-        self.flairEncoder = SingleModalityEncoder()
+        self.t1Encoder = SingleModalityEncoder(feature_dim=feature_dim)
+        self.t2Encoder = SingleModalityEncoder(feature_dim=feature_dim)
+        self.flairEncoder = SingleModalityEncoder(feature_dim=feature_dim)
         
         self.dropout_prob = dropout_prob
 
-        # Transformer mixes cross-modality context between [T1, T2, FLAIR] tokens.
-        encoder_layer = nn.TransformerEncoderLayer(d_model=feature_dim, nhead=4, batch_first=True)
+        # Transformer mixes cross-modality context
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=feature_dim, nhead=4, batch_first=True, dropout=0.3
+        )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        # Classification head
+        # Classification head with dropout
+        self.head_dropout = nn.Dropout(p=0.5)
         self.classifier = nn.Linear(feature_dim * 3, num_classes)
 
     def forward(self, t1, t2, flair):
@@ -96,56 +99,43 @@ class CascadedMixingTransformer(nn.Module):
         feat_t2 = self.t2Encoder(t2)
         feat_flair = self.flairEncoder(flair)
 
-        # During training, randomly mask modality vectors so the model does not overfit to one scan type.
         if self.training:
             feat_t1 = self.applyModalityDropout(feat_t1)
             feat_t2 = self.applyModalityDropout(feat_t2)
             feat_flair = self.applyModalityDropout(feat_flair)
 
-        # Stack features for transformer processing
         sequence = torch.stack([feat_t1, feat_t2, feat_flair], dim=1)
-
-        # Mix features via transformer
         mixed_features = self.transformer(sequence)
 
-        # Flatten and classify
         flat_features = torch.flatten(mixed_features, 1)
+        flat_features = self.head_dropout(flat_features)
         output = self.classifier(flat_features)
         
         return output
 
     def applyModalityDropout(self, x):
-        # Drop per sample (not whole batch) so augmentation is more diverse.
         if self.dropout_prob <= 0:
             return x
         original = x
         keep_mask = (torch.rand(x.size(0), 1, device=x.device) >= self.dropout_prob).float()
         x = x * keep_mask
-        # Safety fallback: if every sample was dropped, keep original features.
         if keep_mask.sum() == 0:
             return original
         return x
 
 
-# --- 3. VERIFICATION ---
-
-# this block runs only when the script is executed directly
 if __name__ == "__main__":
-    # create sample 3d inputs with a small size for quick testing
     dummyT1 = torch.randn(2, 1, 64, 64, 64) 
     dummyT2 = torch.randn(2, 1, 64, 64, 64)
     dummyFlair = torch.randn(2, 1, 64, 64, 64)
     
-    # create an instance of the full model
     model = CascadedMixingTransformer(num_classes=2)
-    
-    # set the model to training mode
     model.train()
     
-    # perform a forward pass to see the output
     output = model(dummyT1, dummyT2, dummyFlair)
     
-    # print the shape of the output to verify correctness
     print("Model Output Shape:", output.shape) 
-    # confirm the model worked as expected
-    print("Success! The model processed inputs and generated an output.")
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params:,}")
+    print("Success!")
