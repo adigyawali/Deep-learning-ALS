@@ -22,3 +22,20 @@ We employ a **Tri-Stream Convolutional Neural Network**.
     *   `FLAIR Encoder` (3D CNN) -> Vector $v_{flair}$
 3.  **Fusion:** The vectors are concatenated: $V_{fused} = [v_{t1}, v_{t2}, v_{flair}]$.
 4.  **Future Integration:** This fused vector represents the entire 3D scan and serves as the input token for the Vision Transformer (ViT).
+
+## Clean Output Structure
+All scripts now write to a single location:
+
+- `src/cnn_features/cnn_multimodal/checkpoints/encoder_weights.pth`
+- `src/cnn_features/cnn_multimodal/features/<subject_id>_features.pt`
+- `src/cnn_features/cnn_multimodal/metrics/*.json`
+
+This keeps checkpoints, extracted features, and evaluation metrics separated.
+
+## Run Order
+1. Train CNN encoder and classifier:
+   - `python cnnModelMultiModality/train_multimodal.py`
+2. Evaluate checkpoint:
+   - `python cnnModelMultiModality/evaluate.py`
+3. Export modality-wise features for ViT:
+   - `python cnnModelMultiModality/generate_features.py`

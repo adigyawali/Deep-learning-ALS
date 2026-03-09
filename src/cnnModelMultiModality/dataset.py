@@ -6,26 +6,21 @@ import nibabel as nib
 from torch.utils.data import Dataset
 from scipy.ndimage import zoom
 
-# this class manages the loading and preprocessing of 3d mri data
-# it inherits from the standard pytorch dataset class
 class MultiModalALSDataset(Dataset):
+    """Loads T1/T2/FLAIR triplets and returns aligned tensors plus binary ALS label."""
+
     def __init__(self, rootDirectory, transform=None, targetShape=(128, 128, 128)):
-        # path to the processed data folders
         self.rootDirectory = rootDirectory
-        # optional transformations (augmentation)
+        # `transform` is treated as a boolean toggle for built-in augmentations.
         self.transform = transform
-        # desired output shape for the 3d volumes
         self.targetShape = targetShape
-        
-        # list to store sample information: (subjectId, t1Path, t2Path, flairPath, label)
+
+        # Each entry stores one subject/visit triplet and its binary label.
         self.samples = []
-        
-        # scan the directory to populate the samples list
         self._prepareDataset()
 
-    # this internal method scans the folder structure to find matched sets of scans
     def _prepareDataset(self):
-        # find all subject folders
+        # Find all subject folders in the processed dataset directory.
         subjectFolders = sorted(glob.glob(os.path.join(self.rootDirectory, "*")))
         
         for folder in subjectFolders:
@@ -34,13 +29,10 @@ class MultiModalALSDataset(Dataset):
                 
             folderName = os.path.basename(folder)
             
-            # determine label based on naming convention
-            # folder names are expected to be {SubjectID}_{VisitID} (e.g. C005_V1)
-            # SubjectIDs starting with 'C' are Controls (0.0)
-            # SubjectIDs starting with 'P' are Patients (1.0)
-            
-            # Split folder name to get SubjectID (e.g., "C005" from "C005_V1")
+            # Expected format: {SubjectID}_{VisitID}, for example C005_V1 or P010_V2.
             parts = folderName.split('_')
+            if len(parts) < 2:
+                continue
             subject_id = parts[0]
             
             if subject_id.startswith("C"):
@@ -55,8 +47,7 @@ class MultiModalALSDataset(Dataset):
                 # skip if convention matches neither
                 continue
                 
-            # construct expected file paths
-            # filenames format: {SubjectID}_{VisitID}_{Modality}.nii.gz
+            # Build expected modality paths under the subject/visit folder.
             t1Path = os.path.join(folder, f"{folderName}_T1.nii.gz")
             t2Path = os.path.join(folder, f"{folderName}_T2.nii.gz")
             flairPath = os.path.join(folder, f"{folderName}_FLAIR.nii.gz")
@@ -71,51 +62,58 @@ class MultiModalALSDataset(Dataset):
                     'label': label
                 })
 
-    # this method returns the total number of samples
     def __len__(self):
         return len(self.samples)
 
-    # this method loads and processes a single sample
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        
-        # load the raw nifti files
+
+        # Load and preprocess each modality with identical spatial target size.
         t1Volume = self._loadVolume(sample['t1'])
         t2Volume = self._loadVolume(sample['t2'])
         flairVolume = self._loadVolume(sample['flair'])
-        
-        # convert label to tensor
+
+        # Apply synchronized spatial augmentation across modalities.
+        if self.transform:
+            # Tensor shape is (1, D, H, W), so data axes are 1/2/3.
+            if np.random.rand() > 0.5:
+                axis = np.random.choice([1, 2, 3])
+                t1Volume = torch.flip(t1Volume, [axis])
+                t2Volume = torch.flip(t2Volume, [axis])
+                flairVolume = torch.flip(flairVolume, [axis])
+
+            # Rotate all modalities together so voxel correspondence stays intact.
+            if np.random.rand() > 0.5:
+                k = np.random.randint(1, 4)
+                dims = np.random.choice([1, 2, 3], size=2, replace=False)
+                dims = tuple(dims.tolist())
+                t1Volume = torch.rot90(t1Volume, k, dims)
+                t2Volume = torch.rot90(t2Volume, k, dims)
+                flairVolume = torch.rot90(flairVolume, k, dims)
+
         label = torch.tensor(sample['label'], dtype=torch.float32)
-        
-        # return tuple of inputs and the label
-        # inputs are (channels, depth, height, width) -> (1, 128, 128, 128)
+
         return (t1Volume, t2Volume, flairVolume), label
 
-    # this helper method loads a nifti file, normalizes, and resizes it
     def _loadVolume(self, path):
-        # load image data using nibabel
+        # Read the 3D NIfTI array from disk.
         proxy = nib.load(path)
         data = proxy.get_fdata()
-        
-        # normalize intensity to range [0, 1]
-        # this is critical for neural network convergence
+
+        # Normalize each volume to [0, 1] to stabilize training.
         data = (data - np.min(data)) / (np.max(data) - np.min(data) + 1e-8)
-        
-        # resize volume to target shape
-        # calculate zoom factors for each dimension
+
+        # Resize to one common shape so batches can be stacked.
         currentShape = data.shape
         zoomFactors = [
             self.targetShape[0] / currentShape[0],
             self.targetShape[1] / currentShape[1],
             self.targetShape[2] / currentShape[2]
         ]
-        
-        # perform spline interpolation (order 1 for speed, 3 for quality)
-        # we use order 1 (linear) to keep preprocessing fast
+
+        # Linear interpolation keeps preprocessing fast and memory-friendly.
         dataResized = zoom(data, zoomFactors, order=1)
-        
-        # add channel dimension: (D, H, W) -> (1, D, H, W)
+
         dataResized = np.expand_dims(dataResized, axis=0)
-        
-        # convert to pytorch float tensor
+
         return torch.from_numpy(dataResized).float()
