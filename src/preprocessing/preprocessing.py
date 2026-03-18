@@ -1,6 +1,5 @@
 import subprocess
 import os
-import re
 import ants
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,17 +14,24 @@ def parse_filename(filepath):
     Returns (subject_id, visit_id, run_num) or None if parsing fails.
     """
     name = filepath.name
+    parts = name.split('_')
+    
+    subject_id = None
+    visit_id = "V1"
+    run_num = 1
+    
+    for part in parts:
+        if (part.startswith('C') or part.startswith('P')) and part[1:].isdigit():
+            subject_id = part
+        elif part.startswith('V') and part[1:].split('.')[0].isdigit():
+            visit_id = part.split('.')[0]
+        elif part.startswith('run-'):
+            r_num = part.split('-')[1].split('.')[0]
+            if r_num.isdigit():
+                run_num = int(r_num)
 
-    match = re.search(r'_([CP]\d+)_', name)
-    if not match:
+    if not subject_id:
         return None
-    subject_id = match.group(1)
-
-    match_visit = re.search(r'_(V\d+)', name)
-    visit_id = match_visit.group(1) if match_visit else "V1"
-
-    match_run = re.search(r'_run-(\d+)', name)
-    run_num = int(match_run.group(1)) if match_run else 1
 
     return (subject_id, visit_id, run_num)
 
@@ -49,7 +55,9 @@ def get_files_dict(raw_dir):
             print(f"Warning: Directory {search_path} not found.")
             continue
 
-        for filepath in sorted(search_path.glob("*.nii.gz")):
+        for filepath in sorted(search_path.iterdir()):
+            if not filepath.is_file() or not filepath.name.endswith('.nii.gz'):
+                continue
             parsed = parse_filename(filepath)
             if not parsed:
                 continue
