@@ -42,7 +42,7 @@ def generate_features() -> None:
         return
 
     # No augmentation during feature extraction — we want deterministic features
-    dataset = MultiModalALSDataset(rootDirectory=str(DATA_DIR), transform=False)
+    dataset = MultiModalALSDataset(rootDirectory=str(DATA_DIR), transform=False, targetShape=(128, 128, 128))
     loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     print(f"Found {len(dataset)} samples.")
 
