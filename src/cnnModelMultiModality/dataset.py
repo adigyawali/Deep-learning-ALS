@@ -26,9 +26,15 @@ Normalisation: Z-score over brain-foreground voxels (intensity > 0).
   Min-max was replaced because it destroys inter-subject intensity
   relationships that carry clinical meaning in T1/T2/FLAIR.
 
-Target shape: 96^3 by default. Change to (128,128,128) if VRAM allows.
+Target shape: 128^3 by default (suited for RTX 5090 32 GB).
+  Reduce to (96,96,96) only if you hit OOM errors.
 
-Augmentation: flip + 90 degree rotation, only when transform=True.
+Augmentation: small random affine perturbation only when transform=True.
+  Flips and 90-degree rotations are intentionally NOT used — all scans are
+  registered to MNI152 space, so axes are standardised and flipping would
+  swap hemispheres or make the brain anatomically nonsensical.
+  Instead we apply ±3 voxel translation and ±5 degree rotation to simulate
+  realistic ANTs registration residuals.
   Pass transform=True for training loaders, False for val/test.
 """
 
@@ -60,7 +66,7 @@ class MultiModalALSDataset(Dataset):
         self,
         rootDirectory,
         transform: bool = False,
-        targetShape: tuple = (96, 96, 96),
+        targetShape: tuple = (128, 128, 128),
     ):
         self.rootDirectory = Path(rootDirectory)
         self.transform     = transform
@@ -184,26 +190,43 @@ class MultiModalALSDataset(Dataset):
         Synchronised augmentation applied identically across all three
         modalities to preserve spatial correspondence.
 
-        Operations:
-          - Random flip along one spatial axis (50% probability)
-          - Random 90 degree rotation in a randomly chosen plane (50% probability)
+        Flips and 90-degree rotations are intentionally NOT used.
+        All scans are registered to MNI152 space by preprocessing.py, so every
+        brain has standardised orientation and coordinate axes.  A left-right
+        flip would swap hemispheres and destroy any subtle asymmetric ALS
+        markers.  A 90-degree rotation would make the brain anatomically
+        nonsensical in MNI space.
 
-        Both are valid for ALS because the disease is bilateral and diffuse --
-        flipping or rotating the brain does not change the label.
-        Do NOT jitter intensities per-modality independently; T1/T2/FLAIR
-        intensity relationships are physically meaningful and must stay intact.
+        Instead we apply a small random affine perturbation — translation up to
+        ±3 voxels and rotation up to ±5 degrees per axis — which simulates the
+        realistic residuals left by ANTs registration.  The same random seed is
+        used for all three modalities so their voxel correspondence is preserved.
         """
-        if np.random.rand() > 0.5:
-            axis  = int(np.random.choice([1, 2, 3]))
-            t1    = torch.flip(t1,    [axis])
-            t2    = torch.flip(t2,    [axis])
-            flair = torch.flip(flair, [axis])
+        try:
+            from monai.transforms import RandAffine
+        except ImportError:
+            # MONAI not available — skip augmentation rather than crash
+            return t1, t2, flair
 
-        if np.random.rand() > 0.5:
-            k    = int(np.random.randint(1, 4))
-            dims = tuple(np.random.choice([1, 2, 3], size=2, replace=False).tolist())
-            t1    = torch.rot90(t1,    k, dims)
-            t2    = torch.rot90(t2,    k, dims)
-            flair = torch.rot90(flair, k, dims)
+        rand_affine = RandAffine(
+            prob=0.8,
+            translate_range=(3, 3, 3),            # voxels
+            rotate_range=(0.087, 0.087, 0.087),   # radians ≈ 5 degrees per axis
+            padding_mode="border",
+            mode="bilinear",
+        )
+
+        # Fix one shared seed so all three modalities receive the identical
+        # spatial transform — voxel correspondence stays intact.
+        shared_seed = int(torch.randint(0, 2 ** 31, (1,)).item())
+
+        rand_affine.set_random_state(seed=shared_seed)
+        t1    = rand_affine(t1)
+
+        rand_affine.set_random_state(seed=shared_seed)
+        t2    = rand_affine(t2)
+
+        rand_affine.set_random_state(seed=shared_seed)
+        flair = rand_affine(flair)
 
         return t1, t2, flair

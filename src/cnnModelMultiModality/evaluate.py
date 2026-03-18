@@ -41,7 +41,7 @@ def evaluateModel() -> None:
         return
 
     # Rebuild the full dataset (no augmentation for evaluation)
-    fullDataset = MultiModalALSDataset(rootDirectory=str(DATA_DIR), transform=False)
+    fullDataset = MultiModalALSDataset(rootDirectory=str(DATA_DIR), transform=False, targetShape=(128, 128, 128))
     _, _, test_indices = split_indices_by_subject(
         fullDataset.samples, train_ratio=0.8, val_ratio=0.1, seed=SEED
     )
