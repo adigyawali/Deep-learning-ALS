@@ -6,7 +6,7 @@ them to FEATURES_DIR for downstream use by the ViT classifier.
 
 Each output .pt file contains:
   {
-    'id'        : str    — subject/visit identifier (e.g. "P010_V2")
+    'id'        : str    — processed sample identifier (e.g. "P010_V2" or "P010_V2_run-02")
     't1_feat'   : Tensor — shape (FEATURE_DIM,)
     't2_feat'   : Tensor — shape (FEATURE_DIM,)
     'flair_feat': Tensor — shape (FEATURE_DIM,)

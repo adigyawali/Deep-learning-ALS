@@ -8,6 +8,10 @@ Reads from the per-subject folder layout produced by preprocessing.py:
         C001_V1_T1.nii.gz
         C001_V1_T2.nii.gz
         C001_V1_FLAIR.nii.gz
+      C001_V1_run-02/
+        C001_V1_run-02_T1.nii.gz
+        C001_V1_run-02_T2.nii.gz
+        C001_V1_run-02_FLAIR.nii.gz
       P010_V2/
         P010_V2_T1.nii.gz
         P010_V2_T2.nii.gz
@@ -15,9 +19,9 @@ Reads from the per-subject folder layout produced by preprocessing.py:
       _QC_Snapshots/   <- ignored automatically
       ...
 
-This layout is written directly by preprocessing.py::process_subject(), which
-saves files as {subj_id}_{visit_id}_T1/T2/FLAIR.nii.gz inside a folder named
-{subj_id}_{visit_id}/.
+This layout is written directly by preprocessing.py, which saves files as
+{folder_name}_T1/T2/FLAIR.nii.gz inside a folder named {folder_name}/ where
+folder_name is usually {subj_id}_{visit_id} or {subj_id}_{visit_id}_run-XX.
 
 Label convention: subject ID starting with 'C' -> control (0),
                   subject ID starting with 'P' -> ALS patient (1).
@@ -39,6 +43,7 @@ Augmentation: small random affine perturbation only when transform=True.
 """
 
 from pathlib import Path
+import re
 
 import nibabel as nib
 import numpy as np
@@ -76,6 +81,11 @@ class MultiModalALSDataset(Dataset):
 
     # ── Dataset construction ──────────────────────────────────────────────
 
+    @staticmethod
+    def _extract_subject_id(folder_name: str) -> str | None:
+        match = re.match(r"^([CP]\d+)(?:_|$)", folder_name, flags=re.IGNORECASE)
+        return match.group(1).upper() if match else None
+
     def _prepareDataset(self) -> None:
         """
         Walk each sub-folder of processed/, look for the three expected NIfTI
@@ -89,14 +99,13 @@ class MultiModalALSDataset(Dataset):
 
         skipped = []
         for folder in subject_folders:
-            folder_name = folder.name          # e.g. "C001_V1" or "P010_V2"
-            parts       = folder_name.split("_")
+            folder_name = folder.name          # e.g. "C001_V1" or "P010_V2_run-02"
 
-            if len(parts) < 2:
-                skipped.append((folder_name, "folder name has fewer than 2 parts"))
+            subject_id = self._extract_subject_id(folder_name)
+            if subject_id is None:
+                skipped.append((folder_name, "folder name does not start with C### or P###"))
                 continue
 
-            subject_id = parts[0]              # "C001" or "P010"
             if subject_id.startswith("C"):
                 label = 0.0
             elif subject_id.startswith("P"):
@@ -121,6 +130,7 @@ class MultiModalALSDataset(Dataset):
             self.samples.append(
                 {
                     "id":    folder_name,
+                    "subject_id": subject_id,
                     "t1":    str(t1_path),
                     "t2":    str(t2_path),
                     "flair": str(flair_path),

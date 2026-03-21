@@ -1,4 +1,5 @@
 import random
+import re
 from collections import defaultdict
 
 
@@ -8,7 +9,10 @@ def split_indices_by_subject(samples, train_ratio=0.8, val_ratio=0.1, seed=42):
     """
     grouped = defaultdict(list)
     for idx, sample in enumerate(samples):
-        subject_id = sample["id"].split("_")[0]
+        subject_id = sample.get("subject_id")
+        if subject_id is None:
+            match = re.match(r"^([CP]\d+)(?:_|$)", sample["id"], flags=re.IGNORECASE)
+            subject_id = match.group(1).upper() if match else sample["id"]
         grouped[subject_id].append(idx)
 
     subject_ids = list(grouped.keys())
