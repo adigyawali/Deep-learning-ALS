@@ -1,44 +1,52 @@
-import os
-import re
 import ants
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-# ── Output folder naming ──────────────────────────────────────────────────────
+# ── Folder name from filename ─────────────────────────────────────────────────
 
-def derive_folder_name(t1_path: Path, index: int) -> str:
+def folder_name_from_path(path: Path) -> str:
     """
-    Derive a clean output folder name from the T1 filename.
-    Strips known suffixes and modality tokens to get e.g. 'P033_V1'.
+    Derive a modality-agnostic folder name directly from the filename.
+    Since the T1 file is used as the key, we strip everything that makes
+    it modality-specific so T1/T2/FLAIR scans all map to the same folder.
 
-    Falls back to 'case_{index:04d}' if no subject ID can be found,
-    so processing never silently stops on an unusual filename.
+    Steps:
+      1. Strip .nii.gz
+      2. Strip _synthstrip suffix
+      3. Strip the modality+sequence token (e.g. _T1w10, _T2w10, _FLAIRw10,
+         or any variant like _T1w, _T2w, _FLAIR, _flair, _T1, _T2 etc.)
+
     """
-    stem = t1_path.name
-    for ext in (".nii.gz", ".nii"):
-        if stem.endswith(ext):
-            stem = stem[: -len(ext)]
-            break
+    import re
+    name = path.name
+    # 1. Strip extension
+    if name.endswith(".nii.gz"):
+        name = name[: -len(".nii.gz")]
+    # 2. Strip _synthstrip
+    if name.endswith("_synthstrip"):
+        name = name[: -len("_synthstrip")]
+    # 3. Strip the modality token: _T1w<digits>, _T2w<digits>, _FLAIR<digits>,
+    #    or shorter forms like _T1w, _T2w, _FLAIR, _T1, _T2
+    name = re.sub(r'_(FLAIR\w*?|T[12]w\d*|T[12])(?=_|$)', '', name, flags=re.IGNORECASE)
+    return name
 
-    # Remove known trailing tokens that are not part of the identity
-    for token in ("_synthstrip", "_T1W", "_T1", "_run-01", "_run-02",
-                  "_run-1", "_run-2", "_run-03", "_run-3"):
-        stem = stem.replace(token, "")
 
-    # Extract subject (C/P + digits) and visit (V + digits) using regex
-    subj_match  = re.search(r'(?<![A-Za-z0-9])(C\d+|P\d+)(?![A-Za-z0-9])', stem)
-    visit_match = re.search(r'(?<![A-Za-z0-9])(V\d+)(?![A-Za-z0-9])',       stem, re.IGNORECASE)
+# ── Already-processed check ───────────────────────────────────────────────────
 
-    if subj_match and visit_match:
-        return f"{subj_match.group(1)}_{visit_match.group(1).upper()}"
-
-    if subj_match:
-        return f"{subj_match.group(1)}_V1"
-
-    # Absolute fallback — never block processing
-    return f"case_{index:04d}"
+def is_already_processed(folder_name: str, output_dir: Path) -> bool:
+    """
+    Returns True only when ALL THREE output files for this exact scan exist.
+    Keyed on the full folder name so no two scans can ever collide.
+    """
+    out = output_dir / folder_name
+    if not out.exists():
+        return False
+    return all(
+        (out / f"{folder_name}_{mod}.nii.gz").exists()
+        for mod in ("T1", "T2", "FLAIR")
+    )
 
 
 # ── QC snapshot ───────────────────────────────────────────────────────────────
@@ -62,20 +70,6 @@ def generate_qc_snapshot(t1, t2, flair, filename: Path) -> None:
     plt.close()
 
 
-# ── Already-processed check ───────────────────────────────────────────────────
-
-def is_already_processed(folder_name: str, output_dir: Path) -> bool:
-    """
-    Returns True only when all three output NIfTI files already exist
-    for this folder name.  Checks the exact files that process_case() saves.
-    """
-    out = output_dir / folder_name
-    if not out.exists():
-        return False
-    return all((out / f"{folder_name}_{mod}.nii.gz").exists()
-               for mod in ("T1", "T2", "FLAIR"))
-
-
 # ── Per-case processing ───────────────────────────────────────────────────────
 
 def process_case(folder_name: str,
@@ -86,8 +80,8 @@ def process_case(folder_name: str,
       1. Reorient to RAS
       2. N4 Bias Field Correction
       3. Register T1 -> MNI152 (Affine)
-      4. Register T2 -> T1, apply combined T1->MNI transform
-      5. Register FLAIR -> T1, apply combined T1->MNI transform
+      4. Register T2 -> T1, then apply combined T1->MNI transform
+      5. Register FLAIR -> T1, then apply combined T1->MNI transform
       6. Save outputs + QC snapshot
     """
     out_dir = output_dir / folder_name
@@ -98,56 +92,52 @@ def process_case(folder_name: str,
     print(f"   T2    : {t2_path.name}")
     print(f"   FLAIR : {flair_path.name}")
 
-    try:
-        # Load
-        t1    = ants.image_read(str(t1_path))
-        t2    = ants.image_read(str(t2_path))
-        flair = ants.image_read(str(flair_path))
+    # Load
+    t1    = ants.image_read(str(t1_path))
+    t2    = ants.image_read(str(t2_path))
+    flair = ants.image_read(str(flair_path))
 
-        # Reorient
-        print("   -> Reorienting to RAS...")
-        t1    = ants.reorient_image2(t1,    orientation="RAS")
-        t2    = ants.reorient_image2(t2,    orientation="RAS")
-        flair = ants.reorient_image2(flair, orientation="RAS")
+    # Reorient
+    print("   -> Reorienting to RAS...")
+    t1    = ants.reorient_image2(t1,    orientation="RAS")
+    t2    = ants.reorient_image2(t2,    orientation="RAS")
+    flair = ants.reorient_image2(flair, orientation="RAS")
 
-        # N4 Bias Correction
-        print("   -> N4 Bias Correction...")
-        t1    = ants.n4_bias_field_correction(t1)
-        t2    = ants.n4_bias_field_correction(t2)
-        flair = ants.n4_bias_field_correction(flair)
+    # N4 Bias Correction
+    print("   -> N4 Bias Correction...")
+    t1    = ants.n4_bias_field_correction(t1)
+    t2    = ants.n4_bias_field_correction(t2)
+    flair = ants.n4_bias_field_correction(flair)
 
-        # MNI152 registration
-        print("   -> Registering T1 -> MNI152 (Affine)...")
-        mni           = ants.image_read(ants.get_ants_data("mni"))
-        t1_reg        = ants.registration(fixed=mni, moving=t1, type_of_transform="Affine")
-        t1_final      = t1_reg["warpedmovout"]
-        t1_transforms = t1_reg["fwdtransforms"]
+    # MNI152 registration
+    print("   -> Registering T1 -> MNI152 (Affine)...")
+    mni           = ants.image_read(ants.get_ants_data("mni"))
+    t1_reg        = ants.registration(fixed=mni, moving=t1, type_of_transform="Affine")
+    t1_final      = t1_reg["warpedmovout"]
+    t1_transforms = t1_reg["fwdtransforms"]
 
-        print("   -> Registering T2 -> T1 -> MNI152...")
-        t2_reg   = ants.registration(fixed=t1, moving=t2, type_of_transform="Rigid")
-        t2_final = ants.apply_transforms(
-            fixed=mni, moving=t2,
-            transformlist=t1_transforms + t2_reg["fwdtransforms"]
-        )
+    print("   -> Registering T2 -> T1 -> MNI152...")
+    t2_reg   = ants.registration(fixed=t1, moving=t2, type_of_transform="Rigid")
+    t2_final = ants.apply_transforms(
+        fixed=mni, moving=t2,
+        transformlist=t1_transforms + t2_reg["fwdtransforms"]
+    )
 
-        print("   -> Registering FLAIR -> T1 -> MNI152...")
-        fl_reg    = ants.registration(fixed=t1, moving=flair, type_of_transform="Rigid")
-        fl_final  = ants.apply_transforms(
-            fixed=mni, moving=flair,
-            transformlist=t1_transforms + fl_reg["fwdtransforms"]
-        )
+    print("   -> Registering FLAIR -> T1 -> MNI152...")
+    fl_reg    = ants.registration(fixed=t1, moving=flair, type_of_transform="Rigid")
+    fl_final  = ants.apply_transforms(
+        fixed=mni, moving=flair,
+        transformlist=t1_transforms + fl_reg["fwdtransforms"]
+    )
 
-        # Save
-        print("   -> Saving...")
-        ants.image_write(t1_final,  str(out_dir / f"{folder_name}_T1.nii.gz"))
-        ants.image_write(t2_final,  str(out_dir / f"{folder_name}_T2.nii.gz"))
-        ants.image_write(fl_final,  str(out_dir / f"{folder_name}_FLAIR.nii.gz"))
-        generate_qc_snapshot(t1_final, t2_final, fl_final,
-                             qc_dir / f"{folder_name}_QC.png")
-        print(f"   -> Done: {folder_name}")
-
-    except Exception as e:
-        print(f"   [!] ERROR processing {folder_name}: {e}")
+    # Save
+    print("   -> Saving...")
+    ants.image_write(t1_final,  str(out_dir / f"{folder_name}_T1.nii.gz"))
+    ants.image_write(t2_final,  str(out_dir / f"{folder_name}_T2.nii.gz"))
+    ants.image_write(fl_final,  str(out_dir / f"{folder_name}_FLAIR.nii.gz"))
+    generate_qc_snapshot(t1_final, t2_final, fl_final,
+                         qc_dir / f"{folder_name}_QC.png")
+    print(f"   -> Done: {folder_name}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -162,7 +152,6 @@ def main():
     processed_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect and sort all files in each modality folder
     t1_dir    = raw_dir / "T1W_synthstrip"
     t2_dir    = raw_dir / "T2W_synthstrip"
     flair_dir = raw_dir / "FLAIR_synthstrip"
@@ -176,25 +165,30 @@ def main():
     t2_files    = sorted(f for f in t2_dir.iterdir()    if f.is_file() and f.name.endswith(".nii.gz"))
     flair_files = sorted(f for f in flair_dir.iterdir() if f.is_file() and f.name.endswith(".nii.gz"))
 
-    # Warn if folder sizes differ — extras in the longer folders are ignored
     counts = {"T1": len(t1_files), "T2": len(t2_files), "FLAIR": len(flair_files)}
     total  = min(counts.values())
 
     print(f"\nFiles found:  T1={counts['T1']}  T2={counts['T2']}  FLAIR={counts['FLAIR']}")
     if len(set(counts.values())) > 1:
         print(f"WARNING: folder sizes differ — processing {total} triplets (shortest folder wins).")
-        print("         Check that all three folders have matching files.")
+        print("         Verify that all three folders have the same files in the same order.")
     print(f"Total triplets to process: {total}\n")
+
+    # Preview all triplets before doing any work
+    print("Triplet preview (T1 filename -> folder name):")
+    for i, t1_path in enumerate(t1_files[:total], start=1):
+        print(f"  {i:04d}  {t1_path.name}  ->  {folder_name_from_path(t1_path)}")
+    print()
 
     skipped   = 0
     processed = 0
     errors    = 0
 
-    # ── Core loop: one iteration = one matched triplet ────────────────────
     for i, (t1_path, t2_path, flair_path) in enumerate(
         zip(t1_files, t2_files, flair_files), start=1
     ):
-        folder_name = derive_folder_name(t1_path, i)
+        # The folder name IS the filename — no interpretation, no regex
+        folder_name = folder_name_from_path(t1_path)
 
         if is_already_processed(folder_name, processed_dir):
             print(f"  [{i:04d}/{total}] SKIP (already done): {folder_name}")
