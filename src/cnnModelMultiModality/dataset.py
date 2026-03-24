@@ -19,27 +19,6 @@ Reads from the per-subject folder layout produced by preprocessing.py:
       _QC_Snapshots/   <- ignored automatically
       ...
 
-This layout is written directly by preprocessing.py, which saves files as
-{folder_name}_T1/T2/FLAIR.nii.gz inside a folder named {folder_name}/ where
-folder_name is usually {subj_id}_{visit_id} or {subj_id}_{visit_id}_run-XX.
-
-Label convention: subject ID starting with 'C' -> control (0),
-                  subject ID starting with 'P' -> ALS patient (1).
-
-Normalisation: Z-score over brain-foreground voxels (intensity > 0).
-  Min-max was replaced because it destroys inter-subject intensity
-  relationships that carry clinical meaning in T1/T2/FLAIR.
-
-Target shape: 128^3 by default (suited for RTX 5090 32 GB).
-  Reduce to (96,96,96) only if you hit OOM errors.
-
-Augmentation: small random affine perturbation only when transform=True.
-  Flips and 90-degree rotations are intentionally NOT used — all scans are
-  registered to MNI152 space, so axes are standardised and flipping would
-  swap hemispheres or make the brain anatomically nonsensical.
-  Instead we apply ±3 voxel translation and ±5 degree rotation to simulate
-  realistic ANTs registration residuals.
-  Pass transform=True for training loaders, False for val/test.
 """
 
 from pathlib import Path
@@ -83,7 +62,9 @@ class MultiModalALSDataset(Dataset):
 
     @staticmethod
     def _extract_subject_id(folder_name: str) -> str | None:
-        match = re.match(r"^([CP]\d+)(?:_|$)", folder_name, flags=re.IGNORECASE)
+        # Folder names are e.g. CALSNIC2_EDM_C007_V1 or CALSNIC2_CAL_P110_V2_run-02
+        # The subject ID (C### or P###) sits between two underscores after the site code
+        match = re.search(r'_([CP]\d+)_', folder_name, flags=re.IGNORECASE)
         return match.group(1).upper() if match else None
 
     def _prepareDataset(self) -> None:
