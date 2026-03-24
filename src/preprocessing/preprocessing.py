@@ -1,5 +1,4 @@
 import re
-import shutil
 import ants
 import numpy as np
 import matplotlib.pyplot as plt
@@ -117,13 +116,9 @@ def main():
     processed_dir = data_root / "processed"
     qc_dir        = processed_dir / "_QC_Snapshots"
 
-    # Wipe and recreate the processed folder on every run
-    if processed_dir.exists():
-        print(f"Deleting existing processed folder: {processed_dir}")
-        shutil.rmtree(processed_dir)
-    processed_dir.mkdir(parents=True)
-    qc_dir.mkdir(parents=True)
-    print("Processed folder cleared.\n")
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    qc_dir.mkdir(parents=True, exist_ok=True)
+    print("Resumable run — already-completed cases will be skipped.\n")
 
     t1_dir    = raw_dir / "T1W_synthstrip"
     t2_dir    = raw_dir / "T2W_synthstrip"
@@ -154,6 +149,17 @@ def main():
         zip(t1_files, t2_files, flair_files), start=1
     ):
         folder_name = folder_name_from_path(t1_path)
+        out_dir     = processed_dir / folder_name
+        all_outputs = [
+            out_dir / f"{folder_name}_T1.nii.gz",
+            out_dir / f"{folder_name}_T2.nii.gz",
+            out_dir / f"{folder_name}_FLAIR.nii.gz",
+        ]
+        if all(p.exists() for p in all_outputs):
+            print(f"  [{i:04d}/{total}] SKIP (already done): {folder_name}")
+            processed += 1
+            continue
+
         print(f"  [{i:04d}/{total}] {folder_name}")
         try:
             process_case(folder_name, t1_path, t2_path, flair_path,
