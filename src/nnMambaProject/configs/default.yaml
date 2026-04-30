@@ -1,0 +1,26 @@
+data:
+  root: Data/processed
+  target_shape: [128, 128, 128]
+  target_spacing: [1.0, 1.0, 1.0]
+
+split:
+  val_frac: 0.15
+  test_frac: 0.15
+  seed: 42
+
+model:
+  in_channels: 3
+  num_classes: 2
+  channels: 32
+  blocks: 3
+
+training:
+  batch_size: 2
+  num_workers: 4
+  lr: 0.0001
+  weight_decay: 0.0001
+  epochs: 100
+
+paths:
+  ckpt_dir: checkpoints
+  log_dir: logs
