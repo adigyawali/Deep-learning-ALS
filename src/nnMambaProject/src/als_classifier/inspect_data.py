@@ -14,11 +14,12 @@ from pathlib import Path
 import nibabel as nib
 
 ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from als_classifier.dataset import LABEL_RE, list_subject_folders  # noqa: E402
 
-DATA_ROOT = ROOT / "Data" / "processed"
+DATA_ROOT = REPO_ROOT / "Data" / "processed"
 MODALITIES = ("T1", "T2", "FLAIR")
 
 
