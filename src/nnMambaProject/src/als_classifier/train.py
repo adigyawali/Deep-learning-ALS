@@ -19,6 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = ROOT.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from als_classifier.dataset import ALSDataset, list_subject_folders
@@ -79,7 +80,7 @@ def main() -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    folders = list_subject_folders(ROOT / cfg["data"]["root"])
+    folders = list_subject_folders(REPO_ROOT / cfg["data"]["root"])
     train_f, val_f, test_f = split_by_subject(
         folders,
         val_frac=cfg["split"]["val_frac"],
