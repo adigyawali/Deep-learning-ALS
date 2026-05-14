@@ -93,6 +93,29 @@ class SingleModalityEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.projection(self._backbone(x))      # (B, feature_dim)
 
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return the ResNet50 layer4 spatial feature map *before* global pooling.
+
+        Used by the spatial ViT, which needs anatomical token positions, not a
+        single pooled vector per modality.
+
+        Input : (B, 1, D, H, W)   — single-modality 3D volume
+        Output: (B, 2048, D', H', W')
+                For 128^3 input, D' = H' = W' = 4 (64 spatial tokens).
+        """
+        b = self._backbone
+        x = b.conv1(x)
+        x = b.bn1(x)
+        x = b.relu(x)
+        if not getattr(b, "no_max_pool", False):
+            x = b.maxpool(x)
+        x = b.layer1(x)
+        x = b.layer2(x)
+        x = b.layer3(x)
+        x = b.layer4(x)
+        return x
+
 
 class CascadedMixingTransformer(nn.Module):
     """

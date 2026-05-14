@@ -1,4 +1,4 @@
-"""Dataset for 3-channel (T1, T2, FLAIR) 3D MRI volumes.
+"""Dataset for (T1, T2, FLAIR) 3D MRI volumes with optional FFT channels.
 
 Each subject-visit folder is named like:
     CALSNIC2_EDM_P110_V1_run-02
@@ -8,6 +8,13 @@ Inside each folder we expect three files:
     <folder_name>_T1.nii.gz
     <folder_name>_T2.nii.gz
     <folder_name>_FLAIR.nii.gz
+
+Output volume shape:
+    use_frequency=False -> (3, D, H, W)  [T1, T2, FLAIR]
+    use_frequency=True  -> (6, D, H, W)  [T1, T2, FLAIR, FFT(T1), FFT(T2), FFT(FLAIR)]
+
+The FFT channels are the log-magnitude of the 3D Fourier transform, fftshifted
+so zero-frequency sits at the center of the volume, and z-scored per channel.
 """
 from __future__ import annotations
 
@@ -23,15 +30,16 @@ from monai.transforms import (
     Compose,
     EnsureChannelFirst,
     NormalizeIntensity,
+    RandAdjustContrast,
     RandAffine,
     RandFlip,
+    RandGaussianNoise,
     ResizeWithPadOrCrop,
     Spacing,
     ToTensor,
 )
 
 
-# Matches '_P110_' or '_C045_' inside the folder name; captures 'P' or 'C'.
 LABEL_RE = re.compile(r"_([PC])\d+_")
 
 
@@ -46,8 +54,31 @@ def list_subject_folders(root: str | Path = "Data/processed") -> list[Path]:
     )
 
 
+def compute_freq_magnitude(x: torch.Tensor) -> torch.Tensor:
+    """3D FFT magnitude of a single-channel volume, log-scaled and z-scored.
+
+    Input:  (1, D, H, W) real-valued spatial volume
+    Output: (1, D, H, W) real-valued frequency-magnitude volume
+
+    Steps:
+      1. fftn -> complex spectrum (same shape)
+      2. |F|  -> magnitude (real, non-negative)
+      3. log(1+|F|) -> compress huge dynamic range (DC bin dominates otherwise)
+      4. fftshift -> move zero-frequency to the center (purely visual/convention)
+      5. z-score -> match the spatial channels' intensity scale
+    """
+    spectrum = torch.fft.fftn(x, dim=(-3, -2, -1))
+    mag = torch.log1p(torch.abs(spectrum))
+    mag = torch.fft.fftshift(mag, dim=(-3, -2, -1))
+    mag = (mag - mag.mean()) / (mag.std() + 1e-6)
+    return mag
+
+
 class ALSDataset(Dataset):
-    """Yields (volume, label) where volume is a (3, D, H, W) float tensor."""
+    """Yields (volume, label) where volume is (C, D, H, W).
+
+    C = 3 when use_frequency is False, 6 when True.
+    """
 
     MODALITIES: tuple[str, ...] = ("T1", "T2", "FLAIR")
 
@@ -57,9 +88,12 @@ class ALSDataset(Dataset):
         train: bool = True,
         target_shape: Sequence[int] = (128, 128, 128),
         target_spacing: Sequence[float] = (1.0, 1.0, 1.0),
+        use_frequency: bool = True,
+        aug_level: str = "medium",
     ):
         self.folders = list(folders)
         self.train = train
+        self.use_frequency = use_frequency
 
         base = [
             EnsureChannelFirst(channel_dim="no_channel"),
@@ -67,17 +101,7 @@ class ALSDataset(Dataset):
             ResizeWithPadOrCrop(spatial_size=tuple(target_shape)),
             NormalizeIntensity(nonzero=True, channel_wise=True),
         ]
-        aug = []
-        if train:
-            aug = [
-                RandFlip(prob=0.5, spatial_axis=0),
-                RandAffine(
-                    prob=0.5,
-                    rotate_range=(0.1, 0.1, 0.1),
-                    scale_range=(0.05, 0.05, 0.05),
-                    padding_mode="zeros",
-                ),
-            ]
+        aug = _build_augmentations(aug_level) if train else []
         self.transform = Compose(base + aug + [ToTensor()])
 
     def __len__(self) -> int:
@@ -100,7 +124,61 @@ class ALSDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
         folder = self.folders[idx]
-        channels = [self._load_modality(folder, m) for m in self.MODALITIES]
-        volume = torch.cat(channels, dim=0)  # (3, D, H, W)
+        spatial = [self._load_modality(folder, m) for m in self.MODALITIES]
+        channels = list(spatial)
+        if self.use_frequency:
+            channels.extend(compute_freq_magnitude(x) for x in spatial)
+        volume = torch.cat(channels, dim=0)  # (C, D, H, W)
         label = self.parse_label(folder.name)
         return volume, label
+
+
+def _build_augmentations(level: str) -> list:
+    """Return a list of MONAI random transforms by intensity level.
+
+    'light'  — current behavior: 1-axis flip + tiny affine
+    'medium' — flips on all 3 axes, stronger affine, gaussian noise, gamma
+    'heavy'  — medium + bias field, smoothing
+    """
+    if level == "light":
+        return [
+            RandFlip(prob=0.5, spatial_axis=0),
+            RandAffine(
+                prob=0.5,
+                rotate_range=(0.1, 0.1, 0.1),
+                scale_range=(0.05, 0.05, 0.05),
+                padding_mode="zeros",
+            ),
+        ]
+    if level == "medium":
+        return [
+            RandFlip(prob=0.5, spatial_axis=0),
+            RandFlip(prob=0.5, spatial_axis=1),
+            RandFlip(prob=0.5, spatial_axis=2),
+            RandAffine(
+                prob=0.7,
+                rotate_range=(0.15, 0.15, 0.15),
+                scale_range=(0.1, 0.1, 0.1),
+                padding_mode="zeros",
+            ),
+            RandGaussianNoise(prob=0.3, mean=0.0, std=0.05),
+            RandAdjustContrast(prob=0.3, gamma=(0.7, 1.5)),
+        ]
+    if level == "heavy":
+        from monai.transforms import RandBiasField, RandGaussianSmooth
+        return [
+            RandFlip(prob=0.5, spatial_axis=0),
+            RandFlip(prob=0.5, spatial_axis=1),
+            RandFlip(prob=0.5, spatial_axis=2),
+            RandAffine(
+                prob=0.8,
+                rotate_range=(0.2, 0.2, 0.2),
+                scale_range=(0.15, 0.15, 0.15),
+                padding_mode="zeros",
+            ),
+            RandGaussianNoise(prob=0.4, mean=0.0, std=0.07),
+            RandAdjustContrast(prob=0.4, gamma=(0.6, 1.6)),
+            RandBiasField(prob=0.3, coeff_range=(0.0, 0.1)),
+            RandGaussianSmooth(prob=0.2, sigma_x=(0.25, 1.0), sigma_y=(0.25, 1.0), sigma_z=(0.25, 1.0)),
+        ]
+    raise ValueError(f"Unknown aug_level: {level!r}. Use 'light', 'medium', or 'heavy'.")

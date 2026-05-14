@@ -92,10 +92,20 @@ def main() -> None:
     ds_kwargs = dict(
         target_shape=cfg["data"]["target_shape"],
         target_spacing=cfg["data"]["target_spacing"],
+        use_frequency=cfg["data"].get("use_frequency", True),
+        aug_level=cfg["data"].get("aug_level", "medium"),
     )
     train_ds = ALSDataset(train_f, train=True, **ds_kwargs)
     val_ds = ALSDataset(val_f, train=False, **ds_kwargs)
     test_ds = ALSDataset(test_f, train=False, **ds_kwargs)
+
+    expected_ch = 6 if ds_kwargs["use_frequency"] else 3
+    if cfg["model"]["in_channels"] != expected_ch:
+        raise ValueError(
+            f"model.in_channels ({cfg['model']['in_channels']}) doesn't match "
+            f"dataset channels ({expected_ch}). With use_frequency="
+            f"{ds_kwargs['use_frequency']}, in_channels must be {expected_ch}."
+        )
 
     dl_kwargs = dict(
         batch_size=cfg["training"]["batch_size"],
