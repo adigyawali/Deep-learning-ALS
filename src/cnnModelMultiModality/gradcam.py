@@ -4,8 +4,6 @@ gradcam.py
 Generates 3D Grad-CAM heatmaps (one per modality: T1, T2, FLAIR) for a single
 subject drawn from the held-out test split, and saves them as NIfTI volumes.
 
-Why this works cleanly here
----------------------------
 The tri-stream architecture has independent ResNet50 encoders for each
 modality.  Hooking each encoder's last conv block (`layer4`) yields a clean
 modality-specific Grad-CAM — backprop from the ALS logit is naturally

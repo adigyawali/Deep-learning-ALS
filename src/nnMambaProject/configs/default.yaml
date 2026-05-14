@@ -2,6 +2,8 @@ data:
   root: Data/processed
   target_shape: [128, 128, 128]
   target_spacing: [1.0, 1.0, 1.0]
+  use_frequency: true
+  aug_level: medium
 
 split:
   val_frac: 0.15
@@ -9,7 +11,7 @@ split:
   seed: 42
 
 model:
-  in_channels: 3
+  in_channels: 6
   num_classes: 2
   channels: 32
   blocks: 3
