@@ -13,8 +13,22 @@ Output volume shape:
     use_frequency=False -> (3, D, H, W)  [T1, T2, FLAIR]
     use_frequency=True  -> (6, D, H, W)  [T1, T2, FLAIR, FFT(T1), FFT(T2), FFT(FLAIR)]
 
-The FFT channels are the log-magnitude of the 3D Fourier transform, fftshifted
-so zero-frequency sits at the center of the volume, and z-scored per channel.
+The FFT channels are the per-channel log-magnitude of the 3D Fourier transform,
+fftshifted so zero-frequency sits at the volume centre, and z-scored per channel.
+
+Augmentation contract (critical for multi-modal MRI)
+----------------------------------------------------
+T1/T2/FLAIR for a subject are co-registered: voxel (i,j,k) refers to the same
+anatomical location in all three. Any *geometric* augmentation (flip, affine)
+MUST therefore be sampled ONCE and applied IDENTICALLY to all modalities, or
+the channels stop describing the same brain and the model cannot learn.
+
+This is enforced structurally: deterministic preprocessing runs per modality
+(safe — it is reproducible), the modalities are stacked into one
+(C, D, H, W) tensor, and the random transforms are applied a single time to
+that stacked tensor so every channel shares one sampled random state. The FFT
+channels are derived *after* augmentation so they stay registered to their
+spatial counterparts.
 """
 from __future__ import annotations
 
@@ -55,23 +69,28 @@ def list_subject_folders(root: str | Path = "Data/processed") -> list[Path]:
 
 
 def compute_freq_magnitude(x: torch.Tensor) -> torch.Tensor:
-    """3D FFT magnitude of a single-channel volume, log-scaled and z-scored.
+    """Per-channel 3D FFT log-magnitude, fftshifted and z-scored.
 
-    Input:  (1, D, H, W) real-valued spatial volume
-    Output: (1, D, H, W) real-valued frequency-magnitude volume
+    Input:  (C, D, H, W) real-valued spatial volume
+    Output: (C, D, H, W) real-valued frequency-magnitude volume
 
-    Steps:
-      1. fftn -> complex spectrum (same shape)
-      2. |F|  -> magnitude (real, non-negative)
-      3. log(1+|F|) -> compress huge dynamic range (DC bin dominates otherwise)
-      4. fftshift -> move zero-frequency to the center (purely visual/convention)
-      5. z-score -> match the spatial channels' intensity scale
+    Steps (applied independently per channel):
+      1. fftn over the spatial dims -> complex spectrum
+      2. |F|                        -> magnitude (real, non-negative)
+      3. log(1+|F|)                 -> compress the huge DC-dominated range
+      4. fftshift                   -> zero-frequency to the centre
+      5. per-channel z-score        -> match the spatial channels' scale
     """
     spectrum = torch.fft.fftn(x, dim=(-3, -2, -1))
     mag = torch.log1p(torch.abs(spectrum))
     mag = torch.fft.fftshift(mag, dim=(-3, -2, -1))
-    mag = (mag - mag.mean()) / (mag.std() + 1e-6)
-    return mag
+    # Per-channel statistics: reduce only over the spatial dims so each
+    # modality's spectrum is normalised on its own, not pooled together.
+    dims = (-3, -2, -1)
+    mean = mag.mean(dim=dims, keepdim=True)
+    std = mag.std(dim=dims, keepdim=True)
+    mag = (mag - mean) / (std + 1e-6)
+    return mag.float()
 
 
 class ALSDataset(Dataset):
@@ -95,14 +114,21 @@ class ALSDataset(Dataset):
         self.train = train
         self.use_frequency = use_frequency
 
-        base = [
+        # Deterministic, reproducible preprocessing — safe to run per modality
+        # because it produces identical output every call (no sampled state),
+        # so modalities stay mutually registered.
+        self.pre = Compose([
             EnsureChannelFirst(channel_dim="no_channel"),
             Spacing(pixdim=tuple(target_spacing), mode="bilinear"),
             ResizeWithPadOrCrop(spatial_size=tuple(target_shape)),
             NormalizeIntensity(nonzero=True, channel_wise=True),
-        ]
+        ])
+
+        # Random augmentation — applied ONCE to the stacked (C, D, H, W)
+        # tensor so a single sampled random state is shared across all
+        # modalities. Identity (just a tensor cast) when not training.
         aug = _build_augmentations(aug_level) if train else []
-        self.transform = Compose(base + aug + [ToTensor()])
+        self.augment = Compose(aug + [ToTensor()])
 
     def __len__(self) -> int:
         return len(self.folders)
@@ -116,19 +142,38 @@ class ALSDataset(Dataset):
         return 1 if m.group(1) == "P" else 0
 
     def _load_modality(self, folder: Path, modality: str) -> torch.Tensor:
+        """Load one modality and apply deterministic preprocessing only.
+
+        Returns a (1, D, H, W) tensor. No random augmentation happens here —
+        that is deferred to the shared, stacked pass in __getitem__.
+        """
         path = folder / f"{folder.name}_{modality}.nii.gz"
         if not path.exists():
             raise FileNotFoundError(f"Missing modality file: {path}")
         arr = nib.load(str(path)).get_fdata().astype(np.float32)
-        return self.transform(arr)  # -> (1, D, H, W) tensor
+        return torch.as_tensor(np.asarray(self.pre(arr)), dtype=torch.float32)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
         folder = self.folders[idx]
+
+        # 1. Deterministic per-modality preprocessing -> uniform shape.
         spatial = [self._load_modality(folder, m) for m in self.MODALITIES]
-        channels = list(spatial)
+
+        # 2. Stack into one multi-channel volume so the random transforms
+        #    below see all modalities together and sample a single shared
+        #    geometric/intensity state for every channel.
+        volume = torch.cat(spatial, dim=0)  # (3, D, H, W)
+
+        # 3. One shared augmentation pass across all channels.
+        volume = torch.as_tensor(
+            np.asarray(self.augment(volume)), dtype=torch.float32
+        )
+
+        # 4. Frequency channels derived from the *augmented* spatial volume,
+        #    so each FFT channel stays registered to its modality.
         if self.use_frequency:
-            channels.extend(compute_freq_magnitude(x) for x in spatial)
-        volume = torch.cat(channels, dim=0)  # (C, D, H, W)
+            volume = torch.cat([volume, compute_freq_magnitude(volume)], dim=0)
+
         label = self.parse_label(folder.name)
         return volume, label
 
@@ -136,7 +181,11 @@ class ALSDataset(Dataset):
 def _build_augmentations(level: str) -> list:
     """Return a list of MONAI random transforms by intensity level.
 
-    'light'  — current behavior: 1-axis flip + tiny affine
+    These run on the stacked (C, D, H, W) volume, so each transform samples
+    one random state and applies it identically to every modality channel —
+    preserving inter-modality registration.
+
+    'light'  — 1-axis flip + tiny affine
     'medium' — flips on all 3 axes, stronger affine, gaussian noise, gamma
     'heavy'  — medium + bias field, smoothing
     """
