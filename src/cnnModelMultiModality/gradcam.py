@@ -8,7 +8,7 @@ The tri-stream architecture has independent ResNet50 encoders for each
 modality.  Hooking each encoder's last conv block (`layer4`) yields a clean
 modality-specific Grad-CAM — backprop from the ALS logit is naturally
 partitioned across the three streams by the late-fusion design.
-
+ 
 Output layout
 -------------
     src/cnn_features/cnn_multimodal/gradcam/<sample_id>/
