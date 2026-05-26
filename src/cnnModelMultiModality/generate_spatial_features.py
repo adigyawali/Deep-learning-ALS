@@ -1,115 +1,167 @@
 """
-generate_spatial_features.py
+Extract per-subject spatial CNN feature maps (ResNet50 layer4) for the ViT.
 
-Extract per-subject *spatial* feature maps from the CNN backbone (ResNet50
-layer4) and save them to SPATIAL_FEATURES_DIR for the spatial ViT.
+For default 128**3 input and MONAI ResNet50, each modality yields a
+(2048, 4, 4, 4) tensor. The output .pt files are consumed by
+`src/ViTModel/dataset.py` -> `ALSSpatialFeatureDataset`.
 
-Each output .pt file contains:
+Each .pt contains:
   {
-    'id'         : str    -- e.g. "P010_V2_run-02"
-    'subject_id' : str    -- e.g. "P010"
-    't1_feat'    : Tensor -- shape (C, D', H', W')
-    't2_feat'    : Tensor -- shape (C, D', H', W')
-    'flair_feat' : Tensor -- shape (C, D', H', W')
-    'label'      : float  -- 0.0 (control) or 1.0 (ALS)
-    'shape'      : tuple  -- (C, D', H', W') for sanity checks
+    'id'         : str
+    'subject_id' : str
+    'site'       : str
+    't1_feat'    : Tensor (C, D', H', W')
+    't2_feat'    : Tensor (C, D', H', W')
+    'flair_feat' : Tensor (C, D', H', W')
+    'label'      : float
+    'shape'      : tuple (C, D', H', W')
   }
-
-For the default 128^3 input through MONAI ResNet50:
-  C = 2048, D' = H' = W' = 4  ->  64 spatial tokens per modality.
-
-If a trained CNN checkpoint exists, its backbone weights are loaded (so any
-backbone fine-tuning is preserved). If not, MedicalNet pretrained weights are
-used as initialised in featureExtractor.py.
 """
 
+from __future__ import annotations
+
+import argparse
+import sys
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
-from classifier import ALSTriStreamClassifier
-from dataset import MultiModalALSDataset
-from paths import ARTIFACTS_DIR, CHECKPOINT_PATH, DATA_DIR, ensure_output_dirs
+_THIS = Path(__file__).resolve()
+sys.path.insert(0, str(_THIS.parents[1]))
+sys.path.insert(0, str(_THIS.parent))
 
-BATCH_SIZE = 1
-DEVICE = torch.device(
-    "mps" if torch.backends.mps.is_available()
-    else "cuda" if torch.cuda.is_available()
-    else "cpu"
-)
+from classifier import ALSTriStreamClassifier   # noqa: E402
+from dataset import MultiModalALSDataset        # noqa: E402
+from paths import ARTIFACTS_DIR, CHECKPOINT_PATH, DATA_DIR, ensure_output_dirs  # noqa: E402
 
 SPATIAL_FEATURES_DIR = ARTIFACTS_DIR / "spatial_features"
 
 
-def generate_spatial_features() -> None:
-    SPATIAL_FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+def _resolve_device(prefer: str) -> torch.device:
+    if prefer == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if prefer == "mps" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    if prefer == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _load_checkpoint(model: torch.nn.Module, ckpt_path: Path, device: torch.device) -> bool:
+    if not ckpt_path.exists():
+        return False
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state = blob["model_state_dict"] if isinstance(blob, dict) and "model_state_dict" in blob else blob
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        print(f"  load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+    return True
+
+
+def generate_spatial_features(
+    *,
+    data_dir: Path,
+    features_dir: Path,
+    ckpt_path: Path,
+    device_name: str,
+    target_shape: tuple[int, int, int],
+    batch_size: int,
+    require_checkpoint: bool,
+) -> None:
     ensure_output_dirs()
-    print(f"--- Spatial feature extraction on {DEVICE} ---")
+    features_dir.mkdir(parents=True, exist_ok=True)
+    device = _resolve_device(device_name)
+    print(f"--- Spatial feature extraction on {device} ---")
 
-    if not DATA_DIR.exists():
-        print(f"Error: Data directory {DATA_DIR} not found.")
+    dataset = MultiModalALSDataset(rootDirectory=data_dir, transform=False, targetShape=target_shape)
+    if len(dataset) == 0:
+        print(f"No samples found in {data_dir}.")
         return
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    print(f"Samples: {len(dataset)}")
 
-    dataset = MultiModalALSDataset(
-        rootDirectory=str(DATA_DIR),
-        transform=False,
-        targetShape=(128, 128, 128),
-    )
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    print(f"Found {len(dataset)} subjects.")
-
-    model = ALSTriStreamClassifier().to(DEVICE)
-    if CHECKPOINT_PATH.exists():
-        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-        print(f"Loaded CNN checkpoint: {CHECKPOINT_PATH}")
+    model = ALSTriStreamClassifier().to(device)
+    loaded = _load_checkpoint(model, ckpt_path, device)
+    if loaded:
+        print(f"Loaded CNN checkpoint: {ckpt_path}")
+    elif require_checkpoint:
+        print(f"Error: --require-checkpoint set but {ckpt_path} not found.")
+        return
     else:
-        print("No CNN checkpoint found -- using MedicalNet pretrained backbone only.")
+        print(f"No checkpoint at {ckpt_path} -- using MedicalNet pretrained weights only.")
     model.eval()
 
     t1_enc = model.model.t1Encoder
     t2_enc = model.model.t2Encoder
-    flair_enc = model.model.flairEncoder
+    fl_enc = model.model.flairEncoder
 
-    print(f"Writing spatial features to: {SPATIAL_FEATURES_DIR}")
+    print(f"Writing spatial features to: {features_dir}")
     written = 0
     with torch.no_grad():
-        for batch_idx, (inputs, _) in enumerate(loader):
-            t1, t2, flair = [v.to(DEVICE) for v in inputs]
-
-            f_t1 = t1_enc.forward_features(t1)        # (B, C, D', H', W')
-            f_t2 = t2_enc.forward_features(t2)
-            f_fl = flair_enc.forward_features(flair)
+        offset = 0
+        for inputs, _ in loader:
+            t1, t2, flair = (v.to(device) for v in inputs)
+            f_t1 = t1_enc.forward_features(t1).cpu()
+            f_t2 = t2_enc.forward_features(t2).cpu()
+            f_fl = fl_enc.forward_features(flair).cpu()
 
             for i in range(t1.size(0)):
-                global_idx = batch_idx * BATCH_SIZE + i
+                global_idx = offset + i
                 if global_idx >= len(dataset):
                     break
-
                 meta = dataset.samples[global_idx]
-                sample_id = meta["id"]
-                save_path = SPATIAL_FEATURES_DIR / f"{sample_id}_spatial.pt"
-
                 payload = {
-                    "id":         sample_id,
+                    "id": meta["id"],
                     "subject_id": meta["subject_id"],
-                    "t1_feat":    f_t1[i].cpu().contiguous(),
-                    "t2_feat":    f_t2[i].cpu().contiguous(),
-                    "flair_feat": f_fl[i].cpu().contiguous(),
-                    "label":      float(meta["label"]),
-                    "shape":      tuple(f_t1[i].shape),
+                    "site": meta.get("site", "UNK"),
+                    "t1_feat": f_t1[i].contiguous(),
+                    "t2_feat": f_t2[i].contiguous(),
+                    "flair_feat": f_fl[i].contiguous(),
+                    "label": float(meta["label"]),
+                    "shape": tuple(f_t1[i].shape),
                 }
-                torch.save(payload, save_path)
+                out_path = features_dir / f"{meta['id']}_spatial.pt"
+                tmp = out_path.with_suffix(".pt.tmp")
+                torch.save(payload, tmp)
+                tmp.replace(out_path)
                 written += 1
+            offset += t1.size(0)
 
     print(f"--- Done. Wrote {written} files. ---")
     if written:
-        first = next(SPATIAL_FEATURES_DIR.glob("*_spatial.pt"))
-        sample = torch.load(first, map_location="cpu")
+        first = next(features_dir.glob("*_spatial.pt"))
+        sample = torch.load(first, map_location="cpu", weights_only=False)
         print(f"First file: {first.name}")
         print(f"  t1_feat shape: {tuple(sample['t1_feat'].shape)}")
-        print(f"  label:         {sample['label']}")
+        print(f"  label        : {sample['label']}")
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Extract spatial CNN features for the ViT.")
+    p.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    p.add_argument("--features-dir", type=Path, default=SPATIAL_FEATURES_DIR)
+    p.add_argument("--checkpoint", type=Path, default=CHECKPOINT_PATH)
+    p.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--target-shape", type=int, nargs=3, default=[128, 128, 128])
+    p.add_argument("--require-checkpoint", action="store_true",
+                   help="Fail if no CNN checkpoint exists (default uses MedicalNet only).")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    generate_spatial_features()
+    args = parse_args()
+    generate_spatial_features(
+        data_dir=args.data_dir,
+        features_dir=args.features_dir,
+        ckpt_path=args.checkpoint,
+        device_name=args.device,
+        target_shape=tuple(args.target_shape),
+        batch_size=args.batch_size,
+        require_checkpoint=args.require_checkpoint,
+    )

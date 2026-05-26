@@ -1,3 +1,15 @@
 Data/
 .DS_Store
 /Data/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.pytest_cache/
+src/cnn_features/
+**/checkpoints/
+*.pt
+*.pth
+splits.json

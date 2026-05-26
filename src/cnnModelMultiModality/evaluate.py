@@ -1,125 +1,138 @@
 """
-evaluate.py
+Evaluate the tri-stream CNN on the held-out test split.
 
-Evaluates the trained ALSTriStreamClassifier on the held-out test split.
-
-Ensures the sigmoid + threshold logic is consistent with the BCEWithLogitsLoss
-contract used in training (single logit output, no softmax).
+Reads `splits.json` (written by train.py) so the test set is identical to the
+test set the ViT will see — preventing accidental cross-stage leakage.
 """
 
-import json
+from __future__ import annotations
 
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
 import torch
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from torch.utils.data import DataLoader, Subset
 
-from classifier import ALSTriStreamClassifier
-from dataset import MultiModalALSDataset
-from paths import CHECKPOINT_PATH, DATA_DIR, METRICS_DIR, ensure_output_dirs
-from split_utils import split_indices_by_subject
+_THIS = Path(__file__).resolve()
+sys.path.insert(0, str(_THIS.parents[1]))
+sys.path.insert(0, str(_THIS.parent))
 
-DEVICE     = torch.device("mps" if torch.backends.mps.is_available()
-                          else "cuda" if torch.cuda.is_available()
-                          else "cpu")
-BATCH_SIZE = 1
-SEED       = 42
+from sklearn.metrics import (
+    accuracy_score, confusion_matrix, f1_score,
+    precision_score, recall_score, roc_auc_score, average_precision_score,
+)
+
+from classifier import ALSTriStreamClassifier  # noqa: E402
+from dataset import MultiModalALSDataset       # noqa: E402
+from paths import ARTIFACTS_DIR, CHECKPOINT_PATH, DATA_DIR, METRICS_DIR, ensure_output_dirs  # noqa: E402
+from splits import indices_from_split, read_splits  # noqa: E402
 
 
-def evaluateModel() -> None:
+def _resolve_device(prefer: str) -> torch.device:
+    if prefer == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if prefer == "mps" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    if prefer == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def evaluate(
+    *,
+    data_dir: Path,
+    ckpt_path: Path,
+    splits_path: Path,
+    metrics_dir: Path,
+    device_name: str,
+    batch_size: int,
+    target_shape: tuple[int, int, int],
+) -> None:
     ensure_output_dirs()
-    print(f"--- Starting Evaluation on {DEVICE} ---")
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    device = _resolve_device(device_name)
+    print(f"--- CNN evaluation on {device} ---")
 
-    if not DATA_DIR.exists():
-        print(f"Error: Data directory {DATA_DIR} not found.")
+    if not ckpt_path.exists():
+        print(f"Error: checkpoint not found: {ckpt_path}")
+        return
+    if not splits_path.exists():
+        print(f"Error: splits.json not found: {splits_path}. Run train.py first.")
         return
 
-    # Rebuild the full dataset (no augmentation for evaluation)
-    fullDataset = MultiModalALSDataset(rootDirectory=str(DATA_DIR), transform=False, targetShape=(128, 128, 128))
-    _, _, test_indices = split_indices_by_subject(
-        fullDataset.samples, train_ratio=0.8, val_ratio=0.1, seed=SEED
-    )
-
-    if not test_indices:
-        print("Test set is empty.  Add more data before running evaluation.")
+    full = MultiModalALSDataset(rootDirectory=data_dir, transform=False, targetShape=target_shape)
+    splits = read_splits(splits_path)
+    test_idx = indices_from_split(full.to_sample_meta(), splits, "test")
+    if not test_idx:
+        print("Test split is empty in splits.json.")
         return
 
-    testSet    = Subset(fullDataset, test_indices)
-    testLoader = DataLoader(testSet, batch_size=BATCH_SIZE, shuffle=False)
+    test_set = Subset(full, test_idx)
+    loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Load checkpoint
-    print(f"-> Loading model from {CHECKPOINT_PATH}...")
-    model = ALSTriStreamClassifier().to(DEVICE)
-
-    if not CHECKPOINT_PATH.exists():
-        print("Error: Checkpoint not found.  Train the model first.")
-        return
-
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
+    model = ALSTriStreamClassifier().to(device)
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state = blob["model_state_dict"] if isinstance(blob, dict) and "model_state_dict" in blob else blob
+    model.load_state_dict(state, strict=False)
     model.eval()
 
-    # Inference
-    allLabels = []
-    allProbs  = []
-
-    print("-> Running inference...")
+    labels: list[float] = []
+    probs: list[float] = []
     with torch.no_grad():
-        for inputs, labels in testLoader:
-            t1, t2, flair = [v.to(DEVICE) for v in inputs]
+        for inputs, y in loader:
+            t1, t2, flair = (v.to(device) for v in inputs)
+            logits = model(t1, t2, flair).squeeze(1)
+            p = torch.sigmoid(logits.float()).cpu().numpy().reshape(-1).tolist()
+            probs.extend(p)
+            labels.extend(y.cpu().numpy().reshape(-1).tolist())
 
-            logits = model(t1, t2, flair).squeeze(1)  # (B,)
-            probs  = torch.sigmoid(logits)             # (B,) ∈ [0, 1]
-
-            allProbs.extend(probs.cpu().tolist())
-            allLabels.extend(labels.cpu().tolist())
-
-    # Convert probabilities → binary predictions at threshold 0.5
-    allPreds = [1 if p >= 0.5 else 0 for p in allProbs]
-    intLabels = [int(l) for l in allLabels]
-
-    acc     = accuracy_score(intLabels, allPreds)
-    prec    = precision_score(intLabels, allPreds, zero_division=0)
-    rec     = recall_score(intLabels, allPreds, zero_division=0)
-    f1      = f1_score(intLabels, allPreds, zero_division=0)
-    confMat = confusion_matrix(intLabels, allPreds)
-
-    # AUC requires at least two classes in the test set
-    try:
-        auc = roc_auc_score(intLabels, allProbs)
-    except ValueError:
-        auc = float("nan")
+    preds = [1 if p >= 0.5 else 0 for p in probs]
+    int_labels = [int(l) for l in labels]
 
     metrics = {
-        "accuracy":          acc,
-        "precision":         prec,
-        "recall":            rec,
-        "f1_score":          f1,
-        "roc_auc":           auc,
-        "confusion_matrix":  confMat.tolist(),
-        "num_test_samples":  len(testSet),
+        "accuracy": float(accuracy_score(int_labels, preds)),
+        "precision": float(precision_score(int_labels, preds, zero_division=0)),
+        "recall": float(recall_score(int_labels, preds, zero_division=0)),
+        "f1_score": float(f1_score(int_labels, preds, zero_division=0)),
+        "roc_auc": float(roc_auc_score(int_labels, probs)) if len(set(int_labels)) > 1 else float("nan"),
+        "pr_auc": float(average_precision_score(int_labels, probs)) if len(set(int_labels)) > 1 else float("nan"),
+        "confusion_matrix": confusion_matrix(int_labels, preds).tolist(),
+        "num_test_samples": len(test_set),
     }
 
-    metrics_path = METRICS_DIR / "evaluation_metrics.json"
-    with metrics_path.open("w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
+    out = metrics_dir / "evaluation_metrics.json"
+    out.write_text(json.dumps(metrics, indent=2))
+    print(json.dumps(metrics, indent=2))
+    print(f"Saved: {out}")
 
-    print("\n--- Evaluation Results ---")
-    print(f"Accuracy  : {acc:.4f}")
-    print(f"Precision : {prec:.4f}")
-    print(f"Recall    : {rec:.4f}")
-    print(f"F1 Score  : {f1:.4f}")
-    print(f"ROC-AUC   : {auc:.4f}")
-    print("\nConfusion Matrix (rows=true, cols=pred):")
-    print(f"  TN={confMat[0,0]}  FP={confMat[0,1]}")
-    print(f"  FN={confMat[1,0]}  TP={confMat[1,1]}")
-    print(f"\nSaved metrics to: {metrics_path}")
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Evaluate the tri-stream CNN.")
+    p.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    p.add_argument("--checkpoint", type=Path, default=CHECKPOINT_PATH)
+    p.add_argument("--splits-path", type=Path, default=ARTIFACTS_DIR / "splits.json")
+    p.add_argument("--metrics-dir", type=Path, default=METRICS_DIR)
+    p.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
+    p.add_argument("--batch-size", type=int, default=2)
+    p.add_argument("--target-shape", type=int, nargs=3, default=[128, 128, 128])
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    evaluateModel()
+    args = parse_args()
+    evaluate(
+        data_dir=args.data_dir,
+        ckpt_path=args.checkpoint,
+        splits_path=args.splits_path,
+        metrics_dir=args.metrics_dir,
+        device_name=args.device,
+        batch_size=args.batch_size,
+        target_shape=tuple(args.target_shape),
+    )

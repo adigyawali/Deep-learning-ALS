@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "als-multimodal-vit"
+version = "0.1.0"
+description = "Multi-modal 3D MRI classification of ALS using a CNN-feature + spatial ViT pipeline."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "monai>=1.4",
+    "antspyx>=0.4",
+    "nibabel>=5.2",
+    "numpy>=1.26,<2.3",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["cnnModelMultiModality*", "ViTModel*", "preprocessing*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

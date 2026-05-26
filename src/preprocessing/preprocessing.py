@@ -1,178 +1,376 @@
+"""
+Multimodal MRI preprocessing for the ALS classification pipeline.
+
+Pipeline per (subject, visit):
+  1. Reorient T1, T2, FLAIR to RAS.
+  2. N4 bias-field correction (optionally masked).
+  3. Register T1 → MNI152 (affine by default; SyN if --nonlinear).
+  4. Register T2 → T1 (rigid) and warp to MNI by composing transforms.
+  5. Register FLAIR → T1 (rigid) and warp to MNI by composing transforms.
+  6. Save the three MNI-space volumes and a QC montage.
+
+Pairing is subject-keyed (NOT sorted-zip). Each modality folder is scanned
+into a dict keyed by (subject_id, visit). A (subject, visit) is processed iff
+all three modalities are present. When multiple files exist for the same
+(subject, visit, modality) — e.g. `_run-02` reruns — the most recent rerun
+wins (highest run number), with no-suffix treated as run 0.
+
+The script auto-detects skull-stripped inputs: it tries `T1W_synthstrip` and
+falls back to `T1W` (same for T2/FLAIR). Override via CLI flags or env vars.
+
+Output layout (subject_id / visit canonicalized to e.g. `C005_V1`):
+    Data/processed/<sample_id>/<sample_id>_T1.nii.gz
+                              /<sample_id>_T2.nii.gz
+                              /<sample_id>_FLAIR.nii.gz
+    Data/processed/_QC_Snapshots/<sample_id>_QC.png
+    Data/processed/manifest.csv      <-- index of all processed samples
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
 import re
-import ants
-import numpy as np
-import matplotlib.pyplot as plt
+import sys
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Optional
+
+import numpy as np
+
+try:
+    import ants
+except ImportError:
+    ants = None  # imported lazily — the script can list pairs without ants
 
 
-# ── Folder name from filename ─────────────────────────────────────────────────
+_T1_RE = re.compile(r"_T1w?\d*_", flags=re.IGNORECASE)
+_T2_RE = re.compile(r"_T2w?\d*_", flags=re.IGNORECASE)
+_FL_RE = re.compile(r"_FLAIR(?:3D|_?EPI)?_?", flags=re.IGNORECASE)
+_SUBJECT_VISIT_RE = re.compile(r"(?:^|_)([CP]\d{3,})_(?:[A-Za-z0-9]+_)*?(V\d+)", flags=re.IGNORECASE)
+_RUN_RE = re.compile(r"_run-(\d+)", flags=re.IGNORECASE)
 
-def folder_name_from_path(path: Path) -> str:
-    """
-    Strip .nii.gz, _synthstrip, and the modality token from the filename.
 
-    CALSNIC2_EDM_P110_T1w10_V1_run-02_synthstrip.nii.gz -> CALSNIC2_EDM_P110_V1_run-02
-    CALSNIC2_CAL_C007_FLAIR_V1_synthstrip.nii.gz        -> CALSNIC2_CAL_C007_V1
-    """
+# ─── Filename parsing ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ScanFile:
+    path: Path
+    subject_id: str
+    visit: str
+    run: int
+
+    @property
+    def sample_id(self) -> str:
+        return f"{self.subject_id}_{self.visit}".upper()
+
+
+def _parse_scan(path: Path, modality_re: re.Pattern) -> Optional[ScanFile]:
+    """Return ScanFile if the filename matches `modality_re` and yields a subject+visit, else None."""
     name = path.name
-    if name.endswith(".nii.gz"):
-        name = name[: -len(".nii.gz")]
-    if name.endswith("_synthstrip"):
-        name = name[: -len("_synthstrip")]
-    name = re.sub(r'_(FLAIR\w*?|T[12]w\d*|T[12])(?=_|$)', '', name, flags=re.IGNORECASE)
-    return name
+    if not name.endswith(".nii.gz"):
+        return None
+    stripped = name[: -len(".nii.gz")]
+    if not modality_re.search(stripped + "_"):
+        return None
+    # Remove the modality token so the subject+visit regex matches without it.
+    cleaned = modality_re.sub("_", stripped + "_").strip("_")
+    sv = _SUBJECT_VISIT_RE.search(cleaned)
+    if not sv:
+        return None
+    subject_id = sv.group(1).upper()
+    visit = sv.group(2).upper()
+    run_match = _RUN_RE.search(name)
+    run = int(run_match.group(1)) if run_match else 0
+    return ScanFile(path=path, subject_id=subject_id, visit=visit, run=run)
 
 
-# ── QC snapshot ───────────────────────────────────────────────────────────────
+def _scan_dir(directory: Path, modality_re: re.Pattern) -> dict[tuple[str, str], ScanFile]:
+    """
+    Scan a modality directory and return {(subject_id, visit) -> ScanFile}.
+    When several runs exist for the same (subject, visit), the highest run wins.
+    """
+    best: dict[tuple[str, str], ScanFile] = {}
+    skipped: list[Path] = []
+    for child in sorted(directory.iterdir()):
+        if not child.is_file():
+            continue
+        scan = _parse_scan(child, modality_re)
+        if scan is None:
+            skipped.append(child)
+            continue
+        key = (scan.subject_id, scan.visit)
+        prev = best.get(key)
+        if prev is None or scan.run > prev.run:
+            best[key] = scan
+    if skipped:
+        # Useful diagnostic without making the script error out.
+        print(f"  [scan] {directory.name}: skipped {len(skipped)} unmatched file(s); e.g. {skipped[0].name}")
+    return best
 
-def generate_qc_snapshot(t1, t2, flair, filename: Path) -> None:
-    """Saves a QC image showing the middle axial slice of each modality."""
-    def mid_slice(img):
+
+def find_triplets(
+    t1_dir: Path,
+    t2_dir: Path,
+    flair_dir: Path,
+) -> list[tuple[ScanFile, ScanFile, ScanFile]]:
+    """Return matched (T1, T2, FLAIR) ScanFiles for every (subject, visit) with all three present."""
+    t1 = _scan_dir(t1_dir, _T1_RE)
+    t2 = _scan_dir(t2_dir, _T2_RE)
+    fl = _scan_dir(flair_dir, _FL_RE)
+
+    keys = sorted(set(t1) & set(t2) & set(fl))
+    only_t1 = sorted(set(t1) - set(t2) - set(fl))
+    only_missing_flair = sorted(set(t1) & set(t2) - set(fl))
+    missing_t2 = sorted(set(t1) & set(fl) - set(t2))
+
+    triplets = [(t1[k], t2[k], fl[k]) for k in keys]
+    print(f"  Found triplets: {len(triplets)}")
+    if only_t1:
+        print(f"  Missing T2+FLAIR for : {[f'{a}_{b}' for a, b in only_t1[:5]]}...")
+    if only_missing_flair:
+        print(f"  Missing FLAIR for     : {[f'{a}_{b}' for a, b in only_missing_flair[:5]]}...")
+    if missing_t2:
+        print(f"  Missing T2 for        : {[f'{a}_{b}' for a, b in missing_t2[:5]]}...")
+    return triplets
+
+
+# ─── ANTs processing ──────────────────────────────────────────────────────
+
+
+def _qc_snapshot(t1, t2, flair, out_path: Path) -> None:
+    """Save a 3-modality middle-axial-slice QC PNG."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def mid(img) -> np.ndarray:
         if img is None:
-            return np.zeros((100, 100))
+            return np.zeros((10, 10), dtype=np.float32)
         arr = img.numpy()
         return np.rot90(arr[:, :, arr.shape[2] // 2])
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    axes[0].imshow(mid_slice(t1),    cmap="gray"); axes[0].set_title("T1")
-    axes[1].imshow(mid_slice(t2),    cmap="gray"); axes[1].set_title("T2")
-    axes[2].imshow(mid_slice(flair), cmap="gray"); axes[2].set_title("FLAIR")
-    for ax in axes:
+    for ax, img, title in zip(axes, (t1, t2, flair), ("T1", "T2", "FLAIR")):
+        ax.imshow(mid(img), cmap="gray")
+        ax.set_title(title)
         ax.axis("off")
-    plt.tight_layout()
-    plt.savefig(filename, dpi=100)
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=100)
+    plt.close(fig)
 
 
-# ── Per-case processing ───────────────────────────────────────────────────────
+def process_case(
+    sample_id: str,
+    t1: ScanFile,
+    t2: ScanFile,
+    flair: ScanFile,
+    processed_dir: Path,
+    qc_dir: Path,
+    nonlinear: bool,
+) -> None:
+    if ants is None:
+        raise ImportError("ANTsPy is required: pip install antspyx")
 
-def process_case(folder_name: str,
-                 t1_path: Path, t2_path: Path, flair_path: Path,
-                 output_dir: Path, qc_dir: Path) -> None:
-    out_dir = output_dir / folder_name
+    out_dir = processed_dir / sample_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n=== [{folder_name}] ===")
-    print(f"   T1    : {t1_path.name}")
-    print(f"   T2    : {t2_path.name}")
-    print(f"   FLAIR : {flair_path.name}")
+    print(f"\n=== [{sample_id}] ===")
+    print(f"   T1    : {t1.path.name}")
+    print(f"   T2    : {t2.path.name}")
+    print(f"   FLAIR : {flair.path.name}")
 
-    # Load
-    t1    = ants.image_read(str(t1_path))
-    t2    = ants.image_read(str(t2_path))
-    flair = ants.image_read(str(flair_path))
+    t1_img = ants.image_read(str(t1.path))
+    t2_img = ants.image_read(str(t2.path))
+    fl_img = ants.image_read(str(flair.path))
 
-    # Reorient
     print("   -> Reorienting to RAS...")
-    t1    = ants.reorient_image2(t1,    orientation="RAS")
-    t2    = ants.reorient_image2(t2,    orientation="RAS")
-    flair = ants.reorient_image2(flair, orientation="RAS")
+    t1_img = ants.reorient_image2(t1_img, orientation="RAS")
+    t2_img = ants.reorient_image2(t2_img, orientation="RAS")
+    fl_img = ants.reorient_image2(fl_img, orientation="RAS")
 
-    # N4 Bias Correction
-    print("   -> N4 Bias Correction...")
-    t1    = ants.n4_bias_field_correction(t1)
-    t2    = ants.n4_bias_field_correction(t2)
-    flair = ants.n4_bias_field_correction(flair)
+    print("   -> N4 bias-field correction...")
+    t1_img = ants.n4_bias_field_correction(t1_img)
+    t2_img = ants.n4_bias_field_correction(t2_img)
+    fl_img = ants.n4_bias_field_correction(fl_img)
 
-    # Register T1 -> MNI152
-    print("   -> Registering T1 -> MNI152 (Affine)...")
-    mni           = ants.image_read(ants.get_ants_data("mni"))
-    t1_reg        = ants.registration(fixed=mni, moving=t1, type_of_transform="Affine")
-    t1_final      = t1_reg["warpedmovout"]
-    t1_transforms = t1_reg["fwdtransforms"]
+    mni = ants.image_read(ants.get_ants_data("mni"))
 
-    # Register T2 -> T1 -> MNI152
-    print("   -> Registering T2 -> T1 -> MNI152...")
-    t2_reg   = ants.registration(fixed=t1, moving=t2, type_of_transform="Rigid")
+    transform_type = "SyN" if nonlinear else "Affine"
+    print(f"   -> Registering T1 -> MNI152 ({transform_type})...")
+    t1_reg = ants.registration(fixed=mni, moving=t1_img, type_of_transform=transform_type)
+    t1_final = t1_reg["warpedmovout"]
+    t1_fwd = t1_reg["fwdtransforms"]
+
+    print("   -> Registering T2 -> T1 (Rigid) -> MNI...")
+    t2_reg = ants.registration(fixed=t1_img, moving=t2_img, type_of_transform="Rigid")
     t2_final = ants.apply_transforms(
-        fixed=mni, moving=t2,
-        transformlist=t1_transforms + t2_reg["fwdtransforms"]
+        fixed=mni,
+        moving=t2_img,
+        transformlist=t1_fwd + t2_reg["fwdtransforms"],
     )
 
-    # Register FLAIR -> T1 -> MNI152
-    print("   -> Registering FLAIR -> T1 -> MNI152...")
-    fl_reg   = ants.registration(fixed=t1, moving=flair, type_of_transform="Rigid")
+    print("   -> Registering FLAIR -> T1 (Rigid) -> MNI...")
+    fl_reg = ants.registration(fixed=t1_img, moving=fl_img, type_of_transform="Rigid")
     fl_final = ants.apply_transforms(
-        fixed=mni, moving=flair,
-        transformlist=t1_transforms + fl_reg["fwdtransforms"]
+        fixed=mni,
+        moving=fl_img,
+        transformlist=t1_fwd + fl_reg["fwdtransforms"],
     )
 
-    # Save
-    print("   -> Saving...")
-    ants.image_write(t1_final,  str(out_dir / f"{folder_name}_T1.nii.gz"))
-    ants.image_write(t2_final,  str(out_dir / f"{folder_name}_T2.nii.gz"))
-    ants.image_write(fl_final,  str(out_dir / f"{folder_name}_FLAIR.nii.gz"))
-    generate_qc_snapshot(t1_final, t2_final, fl_final,
-                         qc_dir / f"{folder_name}_QC.png")
-    print(f"   -> Done: {folder_name}")
+    print("   -> Saving outputs...")
+    ants.image_write(t1_final, str(out_dir / f"{sample_id}_T1.nii.gz"))
+    ants.image_write(t2_final, str(out_dir / f"{sample_id}_T2.nii.gz"))
+    ants.image_write(fl_final, str(out_dir / f"{sample_id}_FLAIR.nii.gz"))
+    _qc_snapshot(t1_final, t2_final, fl_final, qc_dir / f"{sample_id}_QC.png")
+    print(f"   -> Done: {sample_id}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ─── Manifest ─────────────────────────────────────────────────────────────
 
-def main():
-    script_dir    = Path(__file__).resolve().parent
-    data_root     = script_dir / "../../Data"
-    raw_dir       = data_root / "raw"
-    processed_dir = data_root / "processed"
-    qc_dir        = processed_dir / "_QC_Snapshots"
 
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    qc_dir.mkdir(parents=True, exist_ok=True)
-    print("Resumable run — already-completed cases will be skipped.\n")
+def write_manifest(processed_dir: Path, manifest_path: Path) -> int:
+    """Re-scan processed_dir and rebuild manifest.csv. Returns the row count."""
+    rows: list[dict[str, str]] = []
+    for child in sorted(processed_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith("_"):
+            continue
+        name = child.name
+        t1 = child / f"{name}_T1.nii.gz"
+        t2 = child / f"{name}_T2.nii.gz"
+        fl = child / f"{name}_FLAIR.nii.gz"
+        if not (t1.exists() and t2.exists() and fl.exists()):
+            continue
+        sv = _SUBJECT_VISIT_RE.search(name)
+        subject_id = sv.group(1).upper() if sv else name.split("_")[0].upper()
+        visit = sv.group(2).upper() if sv else ""
+        if subject_id.startswith("C"):
+            label = "0"
+        elif subject_id.startswith("P"):
+            label = "1"
+        else:
+            continue
+        rows.append({
+            "sample_id": name,
+            "subject_id": subject_id,
+            "visit": visit,
+            "label": label,
+            "t1": str(t1),
+            "t2": str(t2),
+            "flair": str(fl),
+        })
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["sample_id", "subject_id", "visit", "label", "t1", "t2", "flair"])
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
 
-    t1_dir    = raw_dir / "T1W_synthstrip"
-    t2_dir    = raw_dir / "T2W_synthstrip"
-    flair_dir = raw_dir / "FLAIR_synthstrip"
+
+# ─── Entry point ──────────────────────────────────────────────────────────
+
+
+def _pick_dir(raw_root: Path, preferred: str, fallback: str) -> Path:
+    """Return raw_root/preferred if it exists (and has .nii.gz files), else fallback."""
+    p = raw_root / preferred
+    if p.exists() and any(p.glob("*.nii.gz")):
+        return p
+    return raw_root / fallback
+
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    project_root = Path(__file__).resolve().parents[2]
+    default_raw = project_root / "Data" / "raw"
+    default_processed = project_root / "Data" / "processed"
+
+    p = argparse.ArgumentParser(description="ALS multimodal MRI preprocessing.")
+    p.add_argument("--raw-dir", type=Path, default=default_raw, help="Raw NIfTI root (default: Data/raw).")
+    p.add_argument("--processed-dir", type=Path, default=default_processed, help="Processed output root.")
+    p.add_argument("--t1-subdir", type=str, default=None, help="Subdir under raw-dir for T1. Auto: T1W_synthstrip → T1W.")
+    p.add_argument("--t2-subdir", type=str, default=None, help="Subdir under raw-dir for T2. Auto: T2W_synthstrip → T2W.")
+    p.add_argument("--flair-subdir", type=str, default=None, help="Subdir under raw-dir for FLAIR. Auto: FLAIR_synthstrip → FLAIR.")
+    p.add_argument("--nonlinear", action="store_true", help="Use SyN T1→MNI registration instead of Affine.")
+    p.add_argument("--limit", type=int, default=0, help="If >0, only process the first N triplets (debug).")
+    p.add_argument("--list-only", action="store_true", help="Print matched triplets and exit, no ANTs work.")
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+    raw_dir: Path = args.raw_dir
+    processed_dir: Path = args.processed_dir
+    qc_dir = processed_dir / "_QC_Snapshots"
+
+    t1_dir = raw_dir / args.t1_subdir if args.t1_subdir else _pick_dir(raw_dir, "T1W_synthstrip", "T1W")
+    t2_dir = raw_dir / args.t2_subdir if args.t2_subdir else _pick_dir(raw_dir, "T2W_synthstrip", "T2W")
+    flair_dir = raw_dir / args.flair_subdir if args.flair_subdir else _pick_dir(raw_dir, "FLAIR_synthstrip", "FLAIR")
+
+    print(f"Raw dir       : {raw_dir}")
+    print(f"  T1 from     : {t1_dir.name}")
+    print(f"  T2 from     : {t2_dir.name}")
+    print(f"  FLAIR from  : {flair_dir.name}")
+    print(f"Processed out : {processed_dir}")
 
     for d in (t1_dir, t2_dir, flair_dir):
         if not d.exists():
-            print(f"ERROR: folder not found: {d}")
-            return
+            print(f"ERROR: folder not found: {d}", file=sys.stderr)
+            return 1
 
-    t1_files    = sorted(f for f in t1_dir.iterdir()    if f.is_file() and f.name.endswith(".nii.gz"))
-    t2_files    = sorted(f for f in t2_dir.iterdir()    if f.is_file() and f.name.endswith(".nii.gz"))
-    flair_files = sorted(f for f in flair_dir.iterdir() if f.is_file() and f.name.endswith(".nii.gz"))
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    qc_dir.mkdir(parents=True, exist_ok=True)
 
-    counts = {"T1": len(t1_files), "T2": len(t2_files), "FLAIR": len(flair_files)}
-    total  = min(counts.values())
+    triplets = find_triplets(t1_dir, t2_dir, flair_dir)
+    if args.limit > 0:
+        triplets = triplets[: args.limit]
 
-    print(f"Files found:  T1={counts['T1']}  T2={counts['T2']}  FLAIR={counts['FLAIR']}")
-    if len(set(counts.values())) > 1:
-        print(f"WARNING: folder sizes differ — processing {total} triplets (shortest folder wins).")
-        print("         Verify that all three folders have the same files in the same order.")
-    print(f"Total triplets to process: {total}\n")
+    if args.list_only:
+        for t1, t2, fl in triplets:
+            print(f"{t1.sample_id}\t{t1.path.name}\t{t2.path.name}\t{fl.path.name}")
+        print(f"Total matched: {len(triplets)}")
+        return 0
+
+    if ants is None:
+        print("ERROR: ANTsPy not installed (pip install antspyx) — required to run preprocessing.", file=sys.stderr)
+        return 1
 
     processed = 0
-    errors    = 0
-
-    for i, (t1_path, t2_path, flair_path) in enumerate(
-        zip(t1_files, t2_files, flair_files), start=1
-    ):
-        folder_name = folder_name_from_path(t1_path)
-        out_dir     = processed_dir / folder_name
-        all_outputs = [
-            out_dir / f"{folder_name}_T1.nii.gz",
-            out_dir / f"{folder_name}_T2.nii.gz",
-            out_dir / f"{folder_name}_FLAIR.nii.gz",
+    skipped = 0
+    errors = 0
+    for i, (t1, t2, fl) in enumerate(triplets, start=1):
+        sample_id = t1.sample_id  # e.g. "C005_V1"
+        out_dir = processed_dir / sample_id
+        outputs = [
+            out_dir / f"{sample_id}_T1.nii.gz",
+            out_dir / f"{sample_id}_T2.nii.gz",
+            out_dir / f"{sample_id}_FLAIR.nii.gz",
         ]
-        if all(p.exists() for p in all_outputs):
-            print(f"  [{i:04d}/{total}] SKIP (already done): {folder_name}")
-            processed += 1
+        if all(p.exists() for p in outputs):
+            print(f"  [{i:04d}/{len(triplets)}] SKIP (already done): {sample_id}")
+            skipped += 1
             continue
-
-        print(f"  [{i:04d}/{total}] {folder_name}")
+        print(f"  [{i:04d}/{len(triplets)}] processing {sample_id}")
         try:
-            process_case(folder_name, t1_path, t2_path, flair_path,
-                         processed_dir, qc_dir)
+            process_case(sample_id, t1, t2, fl, processed_dir, qc_dir, nonlinear=args.nonlinear)
             processed += 1
-        except Exception as e:
-            print(f"  [{i:04d}/{total}] ERROR: {folder_name}: {e}")
+        except Exception as exc:
             errors += 1
+            print(f"  [{i:04d}/{len(triplets)}] ERROR for {sample_id}: {exc}", file=sys.stderr)
+            traceback.print_exc()
 
-    print(f"\n{'='*50}")
-    print(f"Finished.  Processed={processed}  Errors={errors}")
-    print(f"{'='*50}")
+    manifest_path = processed_dir / "manifest.csv"
+    rows = write_manifest(processed_dir, manifest_path)
+
+    print()
+    print("=" * 64)
+    print(f"Done.  newly_processed={processed}  already_done={skipped}  errors={errors}")
+    print(f"manifest.csv rows: {rows}  ({manifest_path})")
+    print("=" * 64)
+    return 0 if errors == 0 else 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

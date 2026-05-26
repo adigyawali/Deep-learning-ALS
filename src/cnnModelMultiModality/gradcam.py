@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
 import nibabel as nib
@@ -41,10 +42,13 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import zoom
 
+_THIS = Path(__file__).resolve()
+sys.path.insert(0, str(_THIS.parents[1]))
+
 from classifier import ALSTriStreamClassifier
 from dataset import MultiModalALSDataset
 from paths import ARTIFACTS_DIR, CHECKPOINT_PATH, DATA_DIR, ensure_output_dirs
-from split_utils import split_indices_by_subject
+from splits import indices_from_split, read_splits  # noqa: E402
 
 DEVICE = torch.device(
     "mps"  if torch.backends.mps.is_available() else
@@ -127,7 +131,11 @@ def main() -> None:
     dataset = MultiModalALSDataset(
         rootDirectory=str(DATA_DIR), transform=False, targetShape=TARGET_SHAPE,
     )
-    _, _, test_indices = split_indices_by_subject(dataset.samples, seed=SPLIT_SEED)
+    splits_path = ARTIFACTS_DIR / "splits.json"
+    if not splits_path.exists():
+        raise SystemExit(f"{splits_path} not found. Run cnnModelMultiModality/train.py first.")
+    splits = read_splits(splits_path)
+    test_indices = indices_from_split(dataset.to_sample_meta(), splits, "test")
     if not test_indices:
         raise SystemExit("Test split is empty.")
 

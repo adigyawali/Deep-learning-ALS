@@ -1,0 +1,19 @@
+# Shared Python dependencies.
+# Install PyTorch separately first (CUDA on the lab machine, CPU/MPS wheel on macOS).
+#
+# Lab (RTX 5090 / CUDA 12.x):
+#   pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
+# macOS:
+#   pip install torch torchvision torchaudio
+#
+# Then:
+#   pip install -r requirements.txt
+
+monai>=1.4
+antspyx>=0.4
+nibabel>=5.2
+numpy>=1.26,<2.3
+scipy>=1.11
+scikit-learn>=1.4
+matplotlib>=3.8
+tqdm>=4.66
