@@ -17,6 +17,7 @@ Architecture contract:
 """
 
 import os
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -79,17 +80,44 @@ class SingleModalityEncoder(nn.Module):
             nn.GELU(),
         )
 
+    @staticmethod
+    def _fetch_medicalnet_state_dict() -> dict:
+        """Return the MedicalNet ResNet50 state-dict.
+
+        Source order:
+          1. A local checkpoint pointed to by ALS_MEDICALNET_WEIGHTS. Use this on
+             machines where the Warvito torch.hub repo's Google-Drive download is
+             rate-limited ("Too many users have viewed or downloaded this file").
+             Download `resnet_50_23dataset.pth` once by any means and set the env
+             var to its path.
+          2. torch.hub (Warvito/MedicalNet-models), which downloads from Google
+             Drive via gdown.
+        """
+        local_path = os.environ.get("ALS_MEDICALNET_WEIGHTS", "").strip()
+        if local_path:
+            p = Path(local_path).expanduser()
+            if not p.exists():
+                raise FileNotFoundError(f"ALS_MEDICALNET_WEIGHTS={p} does not exist")
+            print(f"  Loading MedicalNet weights from local file: {p}")
+            raw = torch.load(p, map_location="cpu", weights_only=False)
+            if isinstance(raw, dict) and "state_dict" in raw:
+                return raw["state_dict"]
+            if isinstance(raw, dict):
+                return raw
+            return raw.state_dict()  # a saved model object
+
+        print(f"  Loading MedicalNet pretrained weights ({MEDICALNET_MODEL}) via torch.hub...")
+        # The hub entrypoint takes no `pretrained` flag — it unconditionally
+        # downloads the 23-dataset weights and returns a ResNet with them loaded.
+        # `verbose`/`trust_repo` are consumed by torch.hub.load, not the entrypoint.
+        pretrained = torch.hub.load(MEDICALNET_HUB, MEDICALNET_MODEL,
+                                    verbose=False, trust_repo=True)
+        return pretrained.state_dict()
+
     def _load_medicalnet_weights(self) -> None:
-        print(f"  Loading MedicalNet pretrained weights ({MEDICALNET_MODEL})...")
         require = _require_pretrained()
         try:
-            # The hub entrypoint takes no `pretrained` flag — it unconditionally
-            # downloads the 23-dataset weights from Google Drive (hence gdown) and
-            # returns a ResNet with them loaded. `verbose`/`trust_repo` are consumed
-            # by torch.hub.load itself, not forwarded to the entrypoint.
-            pretrained       = torch.hub.load(MEDICALNET_HUB, MEDICALNET_MODEL,
-                                              verbose=False, trust_repo=True)
-            pretrained_state = pretrained.state_dict()
+            pretrained_state = self._fetch_medicalnet_state_dict()
             backbone_state   = self._backbone.state_dict()
 
             matched, skipped = {}, []
@@ -122,8 +150,10 @@ class SingleModalityEncoder(nn.Module):
                 raise RuntimeError(
                     f"Could not load MedicalNet pretrained weights ({exc}). "
                     "ALS_REQUIRE_PRETRAINED is set, so aborting instead of training "
-                    "a randomly-initialised backbone. Pre-cache the weights in "
-                    "TORCH_HOME or unset ALS_REQUIRE_PRETRAINED to allow a fallback."
+                    "a randomly-initialised backbone. If the torch.hub Google-Drive "
+                    "download is rate-limited, download resnet_50_23dataset.pth once "
+                    "and set ALS_MEDICALNET_WEIGHTS=/path/to/it. Or unset "
+                    "ALS_REQUIRE_PRETRAINED to allow a random-init fallback."
                 ) from exc
             print(f"  WARNING: Could not load MedicalNet weights ({exc}).\n"
                   "  Continuing with random initialisation.")
