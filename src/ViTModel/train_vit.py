@@ -113,6 +113,12 @@ def _youden_threshold(labels, probs) -> float:
         return 0.5
     fpr, tpr, thresholds = roc_curve(labels, probs)
     j = tpr - fpr
+    # sklearn >= 1.3 prepends an `inf` threshold (the "predict nothing positive"
+    # operating point); mask non-finite thresholds so Youden never returns inf.
+    finite = np.isfinite(thresholds)
+    if not finite.any():
+        return 0.5
+    j = np.where(finite, j, -np.inf)
     return float(thresholds[int(np.argmax(j))])
 
 

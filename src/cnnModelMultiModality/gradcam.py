@@ -144,7 +144,11 @@ def main() -> None:
     print(f"-> Sample : {sample['id']}  (true label = {true_lbl})")
 
     model = ALSTriStreamClassifier().to(DEVICE)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
+    # train.py saves a full checkpoint dict ({"model_state_dict": ...}); tolerate
+    # both that and a bare state-dict, matching the other consumers.
+    blob = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+    state = blob["model_state_dict"] if isinstance(blob, dict) and "model_state_dict" in blob else blob
+    model.load_state_dict(state)
     model.eval()
 
     encoders = {

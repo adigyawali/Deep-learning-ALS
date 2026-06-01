@@ -70,7 +70,10 @@ def run_extract_features(args: argparse.Namespace) -> int:
         "--device", args.device,
         "--batch-size", "1",
     ]
-    if args.require_checkpoint:
+    # Require the fine-tuned CNN checkpoint by default: extracting features from
+    # an un-fine-tuned (MedicalNet-only / random) backbone silently degrades the
+    # ViT. Pass --allow-missing-checkpoint to opt out (debug/ablation only).
+    if not args.allow_missing_checkpoint:
         cmd.append("--require-checkpoint")
     return _run(cmd)
 
@@ -125,8 +128,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cnn-epochs", type=int, default=60)
     p.add_argument("--cnn-batch-size", type=int, default=4)
     p.add_argument("--freeze-backbone", action="store_true")
-    p.add_argument("--require-checkpoint", action="store_true",
-                   help="When extracting features, fail if no fine-tuned CNN checkpoint exists.")
+    p.add_argument("--allow-missing-checkpoint", action="store_true",
+                   help="Allow feature extraction to proceed without a fine-tuned CNN "
+                        "checkpoint (uses MedicalNet/random weights). Default requires it.")
     # ViT
     p.add_argument("--vit-epochs", type=int, default=60)
     p.add_argument("--vit-batch-size", type=int, default=8)

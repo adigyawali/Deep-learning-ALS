@@ -1,8 +1,11 @@
 # Shared Python dependencies.
 # Install PyTorch separately first (CUDA on the lab machine, CPU/MPS wheel on macOS).
 #
-# Lab (RTX 5090 / CUDA 12.x):
-#   pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
+# Lab (RTX 5090 — Blackwell, compute capability sm_120):
+#   The RTX 5090 is NOT supported by cu124/cu121 wheels (you will get
+#   "no kernel image is available for execution on the device"). It requires
+#   CUDA 12.8+ and PyTorch >= 2.7 built against cu128:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
 # macOS:
 #   pip install torch torchvision torchaudio
 #

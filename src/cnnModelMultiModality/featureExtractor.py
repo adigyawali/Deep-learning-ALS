@@ -16,6 +16,8 @@ Architecture contract:
   - Final classifier   : CascadedMixingTransformer -> single logit (BCE loss)
 """
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -28,6 +30,16 @@ except ImportError:
 FEATURE_DIM      = 512
 MEDICALNET_HUB   = "Warvito/MedicalNet-models"
 MEDICALNET_MODEL = "medicalnet_resnet50_23datasets"
+
+
+def _require_pretrained() -> bool:
+    """True if the MedicalNet weights must load or training should abort.
+
+    Set ALS_REQUIRE_PRETRAINED=1 for the real lab run so a failed/blocked hub
+    download (offline box, firewall, trust prompt) hard-fails instead of
+    silently training a randomly-initialised backbone.
+    """
+    return os.environ.get("ALS_REQUIRE_PRETRAINED", "").strip().lower() in {"1", "true", "yes"}
 
 
 class SingleModalityEncoder(nn.Module):
@@ -69,9 +81,11 @@ class SingleModalityEncoder(nn.Module):
 
     def _load_medicalnet_weights(self) -> None:
         print(f"  Loading MedicalNet pretrained weights ({MEDICALNET_MODEL})...")
+        require = _require_pretrained()
         try:
             pretrained       = torch.hub.load(MEDICALNET_HUB, MEDICALNET_MODEL,
-                                              pretrained=True, verbose=False)
+                                              pretrained=True, verbose=False,
+                                              trust_repo=True)
             pretrained_state = pretrained.state_dict()
             backbone_state   = self._backbone.state_dict()
 
@@ -83,10 +97,25 @@ class SingleModalityEncoder(nn.Module):
                 else:
                     skipped.append(clean_k)
 
+            if not matched:
+                msg = (f"MedicalNet hub returned weights but 0 matched the backbone "
+                       f"(skipped {len(skipped)}). Backbone would be random.")
+                if require:
+                    raise RuntimeError(msg)
+                print(f"  WARNING: {msg}\n  Continuing with random initialisation.")
+                return
+
             backbone_state.update(matched)
             self._backbone.load_state_dict(backbone_state, strict=False)
             print(f"  MedicalNet weights: {len(matched)} matched, {len(skipped)} skipped.")
         except Exception as exc:
+            if require:
+                raise RuntimeError(
+                    f"Could not load MedicalNet pretrained weights ({exc}). "
+                    "ALS_REQUIRE_PRETRAINED is set, so aborting instead of training "
+                    "a randomly-initialised backbone. Pre-cache the weights in "
+                    "TORCH_HOME or unset ALS_REQUIRE_PRETRAINED to allow a fallback."
+                ) from exc
             print(f"  WARNING: Could not load MedicalNet weights ({exc}).\n"
                   "  Continuing with random initialisation.")
 
