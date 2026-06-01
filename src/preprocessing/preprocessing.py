@@ -18,7 +18,13 @@ wins (highest run number), with no-suffix treated as run 0.
 The script auto-detects skull-stripped inputs: it tries `T1W_synthstrip` and
 falls back to `T1W` (same for T2/FLAIR). Override via CLI flags or env vars.
 
-Output layout (subject_id / visit canonicalized to e.g. `C005_V1`):
+The processed folder/sample name keeps the full source structure
+`DATASET_SITE_SUBJECT_VISIT[_run-NN]` (e.g. `CALSNIC2_CAL_C003_V1`), derived
+from the raw filename minus its extension, optional `_synthstrip` suffix, and
+modality token. Subject grouping/labels are still extracted from this name by
+`src/splits.py`.
+
+Output layout (one folder per subject-visit, all three modalities inside):
     Data/processed/<sample_id>/<sample_id>_T1.nii.gz
                               /<sample_id>_T2.nii.gz
                               /<sample_id>_FLAIR.nii.gz
@@ -51,6 +57,30 @@ _T2_RE = re.compile(r"_T2w?\d*_", flags=re.IGNORECASE)
 _FL_RE = re.compile(r"_FLAIR(?:3D|_?EPI)?_?", flags=re.IGNORECASE)
 _SUBJECT_VISIT_RE = re.compile(r"(?:^|_)([CP]\d{3,})_(?:[A-Za-z0-9]+_)*?(V\d+)", flags=re.IGNORECASE)
 _RUN_RE = re.compile(r"_run-(\d+)", flags=re.IGNORECASE)
+# Modality token removed when building the processed folder/sample name, so the
+# name keeps the full DATASET_SITE_SUBJECT_VISIT[_run-NN] structure.
+_MODALITY_TOKEN_RE = re.compile(r"_(FLAIR(?:3D|_?EPI)?|T[12]w?\d*)(?=_|$)", flags=re.IGNORECASE)
+
+
+def folder_name_from_path(path: Path) -> str:
+    """
+    Processed folder / sample name from a raw filename: strip the `.nii.gz`
+    extension, an optional `_synthstrip` suffix, and the modality token, keeping
+    the full DATASET_SITE_SUBJECT_VISIT[_run-NN] structure.
+
+    Examples
+    --------
+    >>> folder_name_from_path(Path("CALSNIC2_CAL_C003_T1w10_V1.nii.gz"))
+    'CALSNIC2_CAL_C003_V1'
+    >>> folder_name_from_path(Path("CALSNIC2_EDM_P110_T1w10_V1_run-02.nii.gz"))
+    'CALSNIC2_EDM_P110_V1_run-02'
+    """
+    name = path.name
+    if name.lower().endswith(".nii.gz"):
+        name = name[: -len(".nii.gz")]
+    if name.lower().endswith("_synthstrip"):
+        name = name[: -len("_synthstrip")]
+    return _MODALITY_TOKEN_RE.sub("", name)
 
 
 # ─── Filename parsing ─────────────────────────────────────────────────────
@@ -65,7 +95,9 @@ class ScanFile:
 
     @property
     def sample_id(self) -> str:
-        return f"{self.subject_id}_{self.visit}".upper()
+        # Full DATASET_SITE_SUBJECT_VISIT[_run-NN] name (lab convention), derived
+        # from the actual filename. Pairing still keys on (subject_id, visit).
+        return folder_name_from_path(self.path)
 
 
 def _parse_scan(path: Path, modality_re: re.Pattern) -> Optional[ScanFile]:
