@@ -83,9 +83,12 @@ class SingleModalityEncoder(nn.Module):
         print(f"  Loading MedicalNet pretrained weights ({MEDICALNET_MODEL})...")
         require = _require_pretrained()
         try:
+            # The hub entrypoint takes no `pretrained` flag — it unconditionally
+            # downloads the 23-dataset weights from Google Drive (hence gdown) and
+            # returns a ResNet with them loaded. `verbose`/`trust_repo` are consumed
+            # by torch.hub.load itself, not forwarded to the entrypoint.
             pretrained       = torch.hub.load(MEDICALNET_HUB, MEDICALNET_MODEL,
-                                              pretrained=True, verbose=False,
-                                              trust_repo=True)
+                                              verbose=False, trust_repo=True)
             pretrained_state = pretrained.state_dict()
             backbone_state   = self._backbone.state_dict()
 
@@ -97,17 +100,23 @@ class SingleModalityEncoder(nn.Module):
                 else:
                     skipped.append(clean_k)
 
-            if not matched:
-                msg = (f"MedicalNet hub returned weights but 0 matched the backbone "
-                       f"(skipped {len(skipped)}). Backbone would be random.")
+            # The hub repo's ResNet and MONAI's resnet50 must share enough layer
+            # names for a meaningful transfer. A near-zero match means the backbone
+            # would be effectively random despite a "successful" download.
+            n_backbone = len(backbone_state)
+            coverage = len(matched) / max(1, n_backbone)
+            if coverage < 0.5:
+                msg = (f"MedicalNet weights loaded but only {len(matched)}/{n_backbone} "
+                       f"backbone tensors matched ({coverage:.0%}) — likely a layer-naming "
+                       f"mismatch between the hub ResNet and MONAI resnet50; the backbone "
+                       f"would be mostly random.")
                 if require:
                     raise RuntimeError(msg)
-                print(f"  WARNING: {msg}\n  Continuing with random initialisation.")
-                return
+                print(f"  WARNING: {msg}\n  Continuing anyway.")
 
             backbone_state.update(matched)
             self._backbone.load_state_dict(backbone_state, strict=False)
-            print(f"  MedicalNet weights: {len(matched)} matched, {len(skipped)} skipped.")
+            print(f"  MedicalNet weights: {len(matched)}/{n_backbone} matched ({coverage:.0%}), {len(skipped)} skipped.")
         except Exception as exc:
             if require:
                 raise RuntimeError(
