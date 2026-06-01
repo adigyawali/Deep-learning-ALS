@@ -12,4 +12,5 @@ src/cnn_features/
 **/checkpoints/
 *.pt
 *.pth
+Instructions.md
 splits.json
