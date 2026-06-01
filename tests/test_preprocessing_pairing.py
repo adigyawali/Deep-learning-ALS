@@ -16,6 +16,7 @@ from preprocessing.preprocessing import (
     _T2_RE,
     _parse_scan,
     find_triplets,
+    folder_name_from_path,
 )
 
 
@@ -71,7 +72,29 @@ def test_find_triplets_subject_keyed(tmp_path: Path) -> None:
 
     triplets = find_triplets(t1d, t2d, fld)
     ids = {t1.sample_id for t1, *_ in triplets}
-    assert ids == {"C005_V1", "P096_V1"}
+    # Folder/sample name keeps the full DATASET_SITE_SUBJECT_VISIT structure.
+    assert ids == {"CALSNIC2_EDM_C005_V1", "CALSNIC2_EDM_P096_V1"}
+
+
+def test_folder_name_keeps_full_structure(tmp_path: Path) -> None:
+    """Processed name = DATASET_SITE_SUBJECT_VISIT[_run-NN], modality token removed."""
+    cases = {
+        "CALSNIC2_CAL_C003_T1w10_V1.nii.gz": "CALSNIC2_CAL_C003_V1",
+        "CALSNIC2_EDM_P115_T1w10_V1.nii.gz": "CALSNIC2_EDM_P115_V1",
+        "CALSNIC2_EDM_P110_T1w10_V1_run-02.nii.gz": "CALSNIC2_EDM_P110_V1_run-02",
+        "CALSNIC2_CAL_C007_T1w_V1_synthstrip.nii.gz": "CALSNIC2_CAL_C007_V1",
+        "CALSNIC2_CAL_C003_FLAIR3D_V1.nii.gz": "CALSNIC2_CAL_C003_V1",
+        "CALSNIC2_EDM_P015_FLAIR_EPI_V1.nii.gz": "CALSNIC2_EDM_P015_V1",
+        # Lab layout: every raw file carries a trailing _synthstrip.
+        "CALSNIC2_CAL_C003_T1w10_V1_synthstrip.nii.gz": "CALSNIC2_CAL_C003_V1",
+        "CALSNIC2_EDM_P110_T1w10_V1_run-02_synthstrip.nii.gz": "CALSNIC2_EDM_P110_V1_run-02",
+        "CALSNIC2_CAL_C003_FLAIR3D_V1_SynthStrip.nii.gz": "CALSNIC2_CAL_C003_V1",
+    }
+    for raw, expected in cases.items():
+        assert folder_name_from_path(Path(raw)) == expected
+    # And the full name still drives correct subject/label extraction.
+    sf = _parse_scan(tmp_path / "CALSNIC2_CAL_C003_T1w10_V1.nii.gz", _T1_RE)
+    assert sf is not None and sf.sample_id == "CALSNIC2_CAL_C003_V1" and sf.subject_id == "C003"
 
 
 def test_find_triplets_prefers_highest_run(tmp_path: Path) -> None:

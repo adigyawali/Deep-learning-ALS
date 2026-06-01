@@ -22,6 +22,7 @@
 
 monai>=1.4
 antspyx>=0.4
+gdown>=5.1          # required by the MedicalNet torch.hub repo to fetch pretrained weights
 nibabel>=5.2
 numpy>=1.26,<2.3
 scipy>=1.11
