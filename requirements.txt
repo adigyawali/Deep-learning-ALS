@@ -3,9 +3,17 @@
 #
 # Lab (RTX 5090 — Blackwell, compute capability sm_120):
 #   The RTX 5090 is NOT supported by cu124/cu121 wheels (you will get
-#   "no kernel image is available for execution on the device"). It requires
-#   CUDA 12.8+ and PyTorch >= 2.7 built against cu128:
-#   pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+#   "no kernel image is available for execution on the device", and a
+#   "sm_120 is not compatible" warning at import). It requires CUDA 12.8+ and
+#   PyTorch >= 2.7 built against cu128 (cu124 has no torch>=2.7 wheels).
+#
+#   GOTCHA: if a cu124 build is already installed, plain `pip install ... torch`
+#   reports "Requirement already satisfied" and does nothing. You must replace it:
+#     pip uninstall -y torch torchvision torchaudio
+#     pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+#
+#   Verify a real kernel launches (not just torch.cuda.is_available()):
+#     python -c "import torch; x=torch.randn(8,device='cuda'); print((x*2).sum().item())"
 # macOS:
 #   pip install torch torchvision torchaudio
 #
