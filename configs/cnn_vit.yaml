@@ -1,0 +1,53 @@
+# CNN -> spatial ViT.  Stage 1 fine-tunes a tri-stream MedicalNet ResNet on
+# full volumes; stage 2 trains the ViT on the dumped layer4 feature maps.
+seed: 42
+
+data:
+  data_dir: null                # null -> Data/processed
+  target_shape: [128, 128, 128]
+  aug_level: medium
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+
+dataloader:
+  num_workers: 2                # low by default: each worker loads 3 full volumes (host-RAM lever)
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+# Stage 1 — tri-stream 3D CNN (the memory-heavy stage).
+cnn:
+  backbone: resnet50            # resnet10 | resnet18 | resnet34 | resnet50  (smaller = less VRAM)
+  freeze_backbone: false
+  epochs: 60
+  batch_size: 4
+  grad_accum_steps: 1           # raise to keep effective batch while cutting per-step VRAM
+  lr_backbone: 1.0e-5
+  lr_head: 1.0e-3
+  weight_decay: 0.05
+  warmup_epochs: 5
+
+# Stage 2 — spatial multi-modal ViT (cheap; trains on tiny feature maps).
+vit:
+  embed_dim: 384
+  depth: 6
+  num_heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.15
+  modality_dropout_prob: 0.25
+  epochs: 60
+  batch_size: 8
+  lr: 3.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+
+train:
+  best_metric: roc_auc          # roc_auc | pr_auc | balanced_accuracy
+  early_stop_patience: 15
+  clip_grad: 1.0
+  amp: bf16                     # bf16 | fp16 | none  (CUDA only; ignored on CPU/MPS)
+
+eval:
+  bootstrap_n: 2000

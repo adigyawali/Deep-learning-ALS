@@ -1,8 +1,9 @@
-"""
-Shared pytest fixtures and path setup.
+"""Shared pytest setup.
 
-Adds `src/` to sys.path so tests can import the project modules without an
-editable install. Keeps tests independent of how the project is packaged.
+The package is normally installed editable (``pip install -e .``); we also add
+``src/`` to ``sys.path`` so the suite runs straight from a checkout. Tests must
+never hit the network (no MedicalNet download): TORCH_HOME points at a local
+cache and ALS_SKIP_PRETRAINED keeps any backbone build offline.
 """
 
 from __future__ import annotations
@@ -12,12 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
+sys.path.insert(0, str(ROOT / "src"))
 
-# `src/` for the canonical modules (e.g. splits.py).
-sys.path.insert(0, str(SRC))
-# Per-stage paths are injected by individual test modules to avoid `dataset`
-# name collisions between cnnModelMultiModality and ViTModel.
-
-# Tests must never reach the public internet (MedicalNet weight download).
 os.environ.setdefault("TORCH_HOME", str(ROOT / ".pytest_cache" / "torch_home"))
+os.environ.setdefault("ALS_SKIP_PRETRAINED", "1")

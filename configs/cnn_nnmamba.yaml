@@ -1,0 +1,43 @@
+# End-to-end CNN -> nnMamba.  One model: a 3D conv stem feeds a Mamba
+# (selective state-space) sequence model.  Two streams (spatial + frequency)
+# are fused late; set use_frequency: false for the spatial-only ablation.
+seed: 42
+
+data:
+  data_dir: null                # null -> Data/processed
+  target_shape: [128, 128, 128]
+  use_frequency: true           # false -> 3 spatial channels only (clean ablation)
+  aug_level: medium
+
+split:
+  train_ratio: 0.8
+  val_ratio: 0.1
+
+dataloader:
+  num_workers: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+nnmamba:
+  base: 32                      # base conv width (doubles per downsample block, capped at 256)
+  blocks: 3                     # number of stride-2 downsample blocks
+  token_grid: 4                 # adaptive-pool grid -> token_grid^3 Mamba tokens (bounds memory)
+  mamba_layers: 2
+  d_state: 16
+  dropout: 0.1
+  epochs: 100
+  batch_size: 2
+  grad_accum_steps: 2           # effective batch 4 at low per-step VRAM
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+
+train:
+  best_metric: roc_auc
+  early_stop_patience: 20
+  clip_grad: 1.0
+  amp: bf16
+
+eval:
+  bootstrap_n: 2000

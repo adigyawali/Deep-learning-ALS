@@ -8,9 +8,12 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
-src/cnn_features/
+*.egg-info/
+runs/
 **/checkpoints/
 *.pt
 *.pth
-Instructions.md
 splits.json
+Instructions.md
+# NOTE: Instructions.md is intentionally tracked — it is the lab-machine runbook
+# and must reach the lab box via `git pull`.

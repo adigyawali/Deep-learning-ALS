@@ -1,9 +1,0 @@
-nibabel
-monai
-SimpleITK
-scikit-learn
-pandas
-tqdm
-einops
-tensorboard
-pyyaml

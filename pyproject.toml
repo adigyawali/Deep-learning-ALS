@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "als-multimodal-vit"
-version = "0.1.0"
-description = "Multi-modal 3D MRI classification of ALS using a CNN-feature + spatial ViT pipeline."
+name = "als-multimodal"
+version = "0.2.0"
+description = "Multi-modal 3D MRI ALS classification with interchangeable CNN→ViT and CNN→nnMamba models."
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
@@ -18,17 +18,20 @@ dependencies = [
     "scikit-learn>=1.4",
     "matplotlib>=3.8",
     "tqdm>=4.66",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+monitor = ["psutil>=5.9"]          # nicer host-RAM numbers during training (optional)
+mamba = ["mamba-ssm>=2.0"]         # official CUDA Mamba kernel (optional; pure-PyTorch fallback otherwise)
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["cnnModelMultiModality*", "ViTModel*", "preprocessing*"]
+include = ["als*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
