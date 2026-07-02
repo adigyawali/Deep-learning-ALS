@@ -18,7 +18,7 @@ from ..training.optim import amp_dtype_from_str, pos_weight_from_labels, warmup_
 from ._common import make_loader, smoke_trim, volume_forward
 
 
-def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = False) -> None:
+def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     data_dir = get(cfg, "data", "data_dir") or DEFAULT_DATA_DIR
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
     use_frequency = bool(get(cfg, "data", "use_frequency", default=True))
@@ -72,11 +72,11 @@ def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = Fals
         model=model, train_loader=train_loader, val_loader=val_loader,
         forward_fn=volume_forward, criterion=criterion, optimizer=optimizer, scheduler=scheduler,
         device=device, epochs=m["epochs"], ckpt_dir=paths.checkpoints, ckpt_prefix="nnmamba",
-        config=cfg, splits_path=str(paths.splits_path),
+        config=cfg,
         amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
         grad_accum_steps=m.get("grad_accum_steps", 1),
         clip_grad=get(cfg, "train", "clip_grad", default=1.0),
         best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),
         early_stop_patience=get(cfg, "train", "early_stop_patience", default=20),
-        resume=resume, history_path=paths.metrics / "nnmamba_train_history.json",
+        history_path=paths.metrics / "nnmamba_train_history.json",
     )

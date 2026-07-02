@@ -11,7 +11,10 @@ stacked feature tensor), and end-to-end nnMamba (one volume tensor) all reuse:
     per-step memory drops — the main OOM lever besides batch size),
   * a CUDA-OOM guard that prints concrete remedies instead of a bare traceback,
   * per-epoch GPU/host-RAM reporting,
-  * best/latest checkpointing, early stopping, and clean ``--resume``.
+  * best-weights saving (only when validation improves) and early stopping.
+
+There is deliberately no per-epoch checkpoint and no resume: only
+``<prefix>_best.pt`` is written, and only on a validation improvement.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import torch
 
 from .. import gpu
 from . import metrics as M
-from .checkpointing import maybe_resume, save_checkpoint
+from .checkpointing import save_best_weights
 
 ForwardFn = Callable[[torch.nn.Module, object, torch.device], tuple[torch.Tensor, torch.Tensor]]
 
@@ -57,13 +60,11 @@ def fit(
     ckpt_dir: Path | str,
     ckpt_prefix: str,
     config: Optional[dict] = None,
-    splits_path: Optional[str] = None,
     amp_dtype: Optional[torch.dtype] = None,
     grad_accum_steps: int = 1,
     clip_grad: float = 1.0,
     best_metric_name: str = "roc_auc",
     early_stop_patience: int = 15,
-    resume: bool = False,
     history_path: Optional[Path] = None,
 ) -> dict:
     grad_accum_steps = max(1, int(grad_accum_steps))
@@ -71,11 +72,7 @@ def fit(
     use_scaler = use_amp and amp_dtype == torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
-    start_epoch, best_metric = maybe_resume(
-        ckpt_dir, ckpt_prefix, model=model, optimizer=optimizer,
-        scheduler=scheduler, scaler=(scaler if use_scaler else None),
-        device=device, enabled=resume,
-    )
+    best_metric = -float("inf")
 
     n_params = sum(p.numel() for p in model.parameters())
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -88,7 +85,7 @@ def fit(
     epochs_no_improve = 0
     best_threshold = 0.5
 
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(epochs):
         t0 = time.time()
         gpu.reset_peak(device)
 
@@ -170,17 +167,15 @@ def fit(
             best_threshold = threshold
             epochs_no_improve = 0
             tag = " *best"
+            # Save ONLY the best weights so far — no per-epoch/latest checkpoint,
+            # no optimizer/scheduler/scaler/RNG state, so there is no resume.
+            save_best_weights(
+                ckpt_dir, ckpt_prefix,
+                model=model, best_metric=best_metric, best_metric_name=best_metric_name,
+                threshold=best_threshold, config=config,
+            )
         else:
             epochs_no_improve += 1
-
-        save_checkpoint(
-            ckpt_dir, ckpt_prefix,
-            model=model, optimizer=optimizer, scheduler=scheduler,
-            scaler=(scaler if use_scaler else None),
-            epoch=epoch + 1, best_metric=best_metric, best_metric_name=best_metric_name,
-            threshold=best_threshold, config=config, splits_path=splits_path,
-            is_best=improved,
-        )
 
         dt = time.time() - t0
         record = {

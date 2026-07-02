@@ -2,14 +2,12 @@
 
 Before any real training the stages call ``preflight`` to print, in one place:
 dataset size and ALS/non-ALS balance, the train/val/test split counts, the
-device + GPU, the model's parameter count, the shape of one real batch and a
-NaN/inf check on it, and whether a resume checkpoint was found. If the first
-batch is malformed you find out in seconds instead of mid-epoch.
+device + GPU, the model's parameter count, and the shape of one real batch with
+a NaN/inf check on it. If the first batch is malformed you find out in seconds
+instead of mid-epoch.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import torch
 
@@ -76,13 +74,6 @@ def check_one_batch(loader, forward_fn, model, device) -> None:
           f"logits_finite={bool(torch.isfinite(logits).all())}")
 
 
-def resume_status(ckpt_dir: Path | str, prefix: str) -> bool:
-    latest = Path(ckpt_dir) / f"{prefix}_latest.pt"
-    found = latest.exists()
-    print(f"[sanity] resume checkpoint {'FOUND' if found else 'not found'}: {latest}")
-    return found
-
-
 def preflight(*, stage: str, model, dataset, splits, train_loader, forward_fn,
               device, ckpt_dir, ckpt_prefix) -> None:
     print(f"\n[sanity] ===== preflight: {stage} =====")
@@ -91,6 +82,5 @@ def preflight(*, stage: str, model, dataset, splits, train_loader, forward_fn,
     if splits:
         split_report(splits)
     param_count(model)
-    resume_status(ckpt_dir, ckpt_prefix)
     check_one_batch(train_loader, forward_fn, model, device)
     print("[sanity] ===== preflight done =====\n")

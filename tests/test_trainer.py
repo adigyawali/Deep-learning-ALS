@@ -1,4 +1,4 @@
-"""Trainer integration: loop runs, writes latest+best, history, and resumes."""
+"""Trainer integration: loop runs, writes best weights and history (no resume)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _forward(model, batch, device):
     return model(x.to(device)), y.to(device).unsqueeze(1)
 
 
-def test_fit_writes_checkpoints_and_history(tmp_path: Path):
+def test_fit_writes_best_and_history(tmp_path: Path):
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(8, 16), nn.GELU(), nn.Linear(16, 1))
     opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
@@ -37,14 +37,15 @@ def test_fit_writes_checkpoints_and_history(tmp_path: Path):
         amp_dtype=None, grad_accum_steps=2, best_metric_name="roc_auc",
         early_stop_patience=99, history_path=tmp_path / "hist.json",
     )
-    assert (tmp_path / "t_latest.pt").exists()
     assert (tmp_path / "t_best.pt").exists()
+    # No per-epoch / latest / resume checkpoint is written.
+    assert not (tmp_path / "t_latest.pt").exists()
     assert (tmp_path / "hist.json").exists()
     assert len(out["history"]) == 3
     assert out["best_metric_name"] == "roc_auc"
 
 
-def test_fit_resumes_from_latest(tmp_path: Path):
+def test_best_file_is_inference_only(tmp_path: Path):
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(8, 8), nn.GELU(), nn.Linear(8, 1))
     opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
@@ -53,12 +54,7 @@ def test_fit_resumes_from_latest(tmp_path: Path):
                 criterion=nn.BCEWithLogitsLoss(), optimizer=opt, scheduler=None,
                 device=torch.device("cpu"), epochs=2, ckpt_dir=tmp_path, ckpt_prefix="t",
                 amp_dtype=None, early_stop_patience=99)
-
-    # A resumed run for the same #epochs should do no further epochs (already at epoch 2).
-    model2 = nn.Sequential(nn.Linear(8, 8), nn.GELU(), nn.Linear(8, 1))
-    opt2 = torch.optim.AdamW(model2.parameters(), lr=1e-2)
-    out = trainer.fit(model=model2, train_loader=tr, val_loader=va, forward_fn=_forward,
-                      criterion=nn.BCEWithLogitsLoss(), optimizer=opt2, scheduler=None,
-                      device=torch.device("cpu"), epochs=2, ckpt_dir=tmp_path, ckpt_prefix="t",
-                      amp_dtype=None, early_stop_patience=99, resume=True)
-    assert out["history"] == []  # nothing left to do after resuming at the final epoch
+    blob = torch.load(tmp_path / "t_best.pt", weights_only=False)
+    for forbidden in ("optimizer_state_dict", "scheduler_state_dict",
+                      "scaler_state_dict", "rng", "epoch"):
+        assert forbidden not in blob

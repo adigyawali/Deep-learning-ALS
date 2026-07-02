@@ -31,7 +31,7 @@ def _build_optimizer(model, lr_backbone, lr_head, wd):
     )
 
 
-def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = False) -> None:
+def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     data_dir = get(cfg, "data", "data_dir") or DEFAULT_DATA_DIR
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
     aug_level = get(cfg, "data", "aug_level", default="medium")
@@ -79,11 +79,11 @@ def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = Fals
         model=model, train_loader=train_loader, val_loader=val_loader,
         forward_fn=cnn_forward, criterion=criterion, optimizer=optimizer, scheduler=scheduler,
         device=device, epochs=c["epochs"], ckpt_dir=paths.checkpoints, ckpt_prefix="cnn",
-        config=cfg, splits_path=str(paths.splits_path),
+        config=cfg,
         amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
         grad_accum_steps=c.get("grad_accum_steps", 1),
         clip_grad=get(cfg, "train", "clip_grad", default=1.0),
         best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),
         early_stop_patience=get(cfg, "train", "early_stop_patience", default=15),
-        resume=resume, history_path=paths.metrics / "cnn_train_history.json",
+        history_path=paths.metrics / "cnn_train_history.json",
     )

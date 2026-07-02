@@ -15,5 +15,4 @@ runs/
 *.pth
 splits.json
 Instructions.md
-# NOTE: Instructions.md is intentionally tracked — it is the lab-machine runbook
-# and must reach the lab box via `git pull`.
+

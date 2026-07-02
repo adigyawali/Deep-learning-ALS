@@ -17,7 +17,7 @@ from ..training.optim import amp_dtype_from_str, warmup_cosine_scheduler
 from ._common import make_loader, smoke_trim, vit_forward
 
 
-def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = False) -> None:
+def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     v = cfg["vit"]
     dataset = ALSSpatialFeatureDataset(features_dir=paths.features)
     if len(dataset) < 3:
@@ -62,10 +62,10 @@ def run(cfg: dict, paths: RunPaths, device: torch.device, *, resume: bool = Fals
         model=model, train_loader=train_loader, val_loader=val_loader,
         forward_fn=vit_forward, criterion=criterion, optimizer=optimizer, scheduler=scheduler,
         device=device, epochs=v["epochs"], ckpt_dir=paths.checkpoints, ckpt_prefix="vit",
-        config=cfg, splits_path=str(paths.splits_path),
+        config=cfg,
         amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
         clip_grad=get(cfg, "train", "clip_grad", default=1.0),
         best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),
         early_stop_patience=get(cfg, "train", "early_stop_patience", default=15),
-        resume=resume, history_path=paths.metrics / "vit_train_history.json",
+        history_path=paths.metrics / "vit_train_history.json",
     )

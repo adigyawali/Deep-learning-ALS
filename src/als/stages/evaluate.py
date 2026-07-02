@@ -109,7 +109,6 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         "num_test_samples": len(test_idx),
         "best_val_metric_name": blob.get("best_metric_name"),
         "best_val_metric": blob.get("best_metric"),
-        "epoch_of_best": blob.get("epoch"),
     })
 
     # Per-site metrics when more than one site is present.

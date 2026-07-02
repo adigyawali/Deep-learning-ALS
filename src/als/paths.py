@@ -8,13 +8,13 @@ shared at ``runs/splits.json`` so both models train/eval on the same subjects.
     runs/
       splits.json                   # SHARED canonical split (written once)
       cnn_vit/
-        checkpoints/                # cnn_{latest,best}.pt, vit_{latest,best}.pt
+        checkpoints/                # cnn_best.pt, vit_best.pt  (best weights only)
         features/                   # <id>_spatial.pt  (CNN layer4 maps for the ViT)
         metrics/                    # *_history.json, evaluation.json, predictions.json
         logs/
         config.json                 # resolved config snapshot for this run
       cnn_nnmamba/
-        checkpoints/                # {latest,best}.pt
+        checkpoints/                # nnmamba_best.pt  (best weights only)
         metrics/  logs/  config.json
 """
 
