@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import torch
+from tqdm import tqdm
 
 from .. import gpu
 from . import metrics as M
@@ -96,7 +97,9 @@ def fit(
         tr_probs: list[float] = []
         optimizer.zero_grad(set_to_none=True)
 
-        for step, batch in enumerate(train_loader):
+        pbar = tqdm(train_loader, desc=f"E{epoch + 1:02d}/{epochs} train",
+                    leave=False, dynamic_ncols=True)
+        for step, batch in enumerate(pbar):
             try:
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     logits, labels = forward_fn(model, batch, device)
@@ -119,6 +122,7 @@ def fit(
             bs = labels.size(0)
             running_loss += float(loss.detach()) * bs
             seen += bs
+            pbar.set_postfix(loss=f"{running_loss / max(1, seen):.4f}")
             with torch.no_grad():
                 p = torch.sigmoid(logits.detach().float()).reshape(-1).cpu().tolist()
             tr_probs.extend(p)
@@ -142,7 +146,8 @@ def fit(
         va_labels: list[float] = []
         va_probs: list[float] = []
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader, desc=f"E{epoch + 1:02d}/{epochs} val",
+                              leave=False, dynamic_ncols=True):
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     logits, labels = forward_fn(model, batch, device)
                     loss = criterion(logits, labels)
