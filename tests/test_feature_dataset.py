@@ -34,7 +34,8 @@ def test_split_hookup_no_leakage(tmp_path: Path):
                    0.0 if sid.startswith("C") else 1.0, subject_id=sid)
     ds = ALSSpatialFeatureDataset(features_dir=tmp_path)
     sp = load_or_build_splits(ds.samples, tmp_path / "splits.json", seed=42)
-    subj = lambda kind: {ds.samples[i].subject_id for i in indices_from(ds.samples, sp, kind)}
-    tr, va, te = subj("train"), subj("val"), subj("test")
+    tr = {ds.samples[i].subject_id for i in indices_from(ds.samples, sp, "train", fold=0)}
+    va = {ds.samples[i].subject_id for i in indices_from(ds.samples, sp, "val", fold=0)}
+    te = {ds.samples[i].subject_id for i in indices_from(ds.samples, sp, "test")}
     assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)
     assert len(tr) > 0

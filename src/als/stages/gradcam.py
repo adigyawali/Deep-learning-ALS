@@ -46,7 +46,11 @@ def _save_heatmap(cam: np.ndarray, ref_path: str, save_path) -> None:
 def run(cfg: dict, paths: RunPaths, device: torch.device, *, subject: str | None = None) -> None:
     data_dir = get(cfg, "data", "data_dir") or DEFAULT_DATA_DIR
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
-    ckpt = paths.checkpoints / "cnn_best.pt"
+    # Grad-CAM is illustrative, not a metric — use fold 0's CNN on the shared
+    # held-out test subjects.
+    gradcam_fold = int(get(cfg, "gradcam", "fold", default=0))
+    fpaths = paths.fold(gradcam_fold)
+    ckpt = fpaths.checkpoints / "cnn_best.pt"
     if not ckpt.exists():
         print(f"[gradcam] checkpoint {ckpt} not found. Train the CNN first.")
         return

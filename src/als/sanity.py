@@ -28,12 +28,21 @@ def count_report(samples) -> dict:
 
 
 def split_report(splits: dict) -> None:
+    """Print the held-out test set plus each CV fold's train/val balance."""
     cc = splits.get("class_counts", {})
-    for kind in ("train", "val", "test"):
-        subj = len(splits.get(f"{kind}_subjects", []))
-        c = cc.get(kind, {})
-        print(f"[sanity] {kind:5s}: subjects={subj}  controls={c.get('control', '?')}  "
-              f"patients={c.get('patient', '?')}")
+    test_c = cc.get("test", {})
+    n_folds = splits.get("n_folds", len(splits.get("folds", [])))
+    print(f"[sanity] scheme: {n_folds}-fold CV + held-out test "
+          f"(test_ratio={splits.get('test_ratio', '?')})")
+    print(f"[sanity] test : subjects={len(splits.get('test_subjects', []))}  "
+          f"controls={test_c.get('control', '?')}  patients={test_c.get('patient', '?')}")
+    for k, fold in enumerate(splits.get("folds", [])):
+        fc = cc.get("folds", [{}] * (k + 1))[k] if k < len(cc.get("folds", [])) else {}
+        tr, va = fc.get("train", {}), fc.get("val", {})
+        print(f"[sanity] fold{k}: train subj={len(fold.get('train_subjects', []))} "
+              f"(c{tr.get('control', '?')}/p{tr.get('patient', '?')})  "
+              f"val subj={len(fold.get('val_subjects', []))} "
+              f"(c{va.get('control', '?')}/p{va.get('patient', '?')})")
 
 
 def param_count(model: torch.nn.Module) -> tuple[int, int]:

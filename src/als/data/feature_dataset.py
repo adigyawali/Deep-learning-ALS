@@ -116,8 +116,8 @@ def compute_pos_weight(samples: List[FeatureSample], indices: List[int]) -> torc
     return torch.tensor(weight, dtype=torch.float32)
 
 
-def indices_from(samples: List[FeatureSample], splits: dict, kind: str) -> list[int]:
-    return indices_from_split([s.to_meta() for s in samples], splits, kind)
+def indices_from(samples: List[FeatureSample], splits: dict, kind: str, fold: int | None = None) -> list[int]:
+    return indices_from_split([s.to_meta() for s in samples], splits, kind, fold)
 
 
 __all__ = [

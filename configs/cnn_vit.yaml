@@ -8,8 +8,8 @@ data:
   aug_level: medium
 
 split:
-  train_ratio: 0.8
-  val_ratio: 0.1
+  n_folds: 5                    # 5-fold stratified CV over the 80% CV pool
+  test_ratio: 0.2               # fixed, subject-level held-out test set
 
 dataloader:
   num_workers: 2                # low by default: each worker loads 3 full volumes (host-RAM lever)

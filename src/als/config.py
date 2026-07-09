@@ -73,6 +73,8 @@ def apply_smoke(cfg: dict) -> dict:
     cfg.setdefault("dataloader", {})["num_workers"] = 0
     cfg.setdefault("eval", {})["bootstrap_n"] = 50
     cfg.setdefault("train", {})["early_stop_patience"] = 99
+    # Keep the CV wiring exercised but fast: 2 folds instead of 5.
+    cfg.setdefault("split", {})["n_folds"] = 2
     if cfg["model"] == "cnn_vit":
         cfg["cnn"].update({"backbone": "resnet10", "epochs": 2, "batch_size": 2, "freeze_backbone": False})
         cfg["vit"].update({"embed_dim": 32, "depth": 2, "num_heads": 2, "epochs": 2, "batch_size": 2})

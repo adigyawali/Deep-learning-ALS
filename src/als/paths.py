@@ -6,16 +6,22 @@ shared at ``runs/splits.json`` so both models train/eval on the same subjects.
 
     Data/processed/                 # one folder per subject-visit (preprocessing output)
     runs/
-      splits.json                   # SHARED canonical split (written once)
+      splits.json                   # SHARED split: held-out test + 5 CV folds
       cnn_vit/
-        checkpoints/                # cnn_best.pt, vit_best.pt  (best weights only)
-        features/                   # <id>_spatial.pt  (CNN layer4 maps for the ViT)
-        metrics/                    # *_history.json, evaluation.json, predictions.json
-        logs/
         config.json                 # resolved config snapshot for this run
+        metrics/                    # cv_summary.json, test_evaluation.json, predictions.json
+        fold0/                      # one such tree per CV fold
+          checkpoints/              # cnn_best.pt, vit_best.pt  (best weights only)
+          features/                 # <id>_spatial.pt  (fold-k CNN layer4 maps)
+          metrics/                  # cnn_train_history.json, vit_train_history.json
+          logs/
+        fold1/ ... fold4/
       cnn_nnmamba/
-        checkpoints/                # nnmamba_best.pt  (best weights only)
-        metrics/  logs/  config.json
+        config.json
+        metrics/                    # cv_summary.json, test_evaluation.json, predictions.json
+        fold0/ ... fold4/
+          checkpoints/              # nnmamba_best.pt  (best weights only)
+          metrics/  logs/
 """
 
 from __future__ import annotations
@@ -46,6 +52,27 @@ class RunPaths:
             d.mkdir(parents=True, exist_ok=True)
         self.splits_path.parent.mkdir(parents=True, exist_ok=True)
         return self
+
+    def fold(self, k: int) -> "RunPaths":
+        """Per-fold paths under ``runs/<model>/fold{k}/``.
+
+        Each CV fold gets its own checkpoints / features / metrics / logs so the
+        five folds never overwrite each other. The shared ``splits.json`` and the
+        model-level ``config.json`` are left at the model root; aggregated
+        cross-fold metrics (``cv_summary.json``, ``test_evaluation.json``) are
+        written to the model-level ``metrics`` dir, not a fold's.
+        """
+        froot = self.root / f"fold{int(k)}"
+        return RunPaths(
+            model=self.model,
+            root=froot,
+            checkpoints=froot / "checkpoints",
+            features=froot / "features",
+            metrics=froot / "metrics",
+            logs=froot / "logs",
+            config_json=self.config_json,   # shared snapshot at the model root
+            splits_path=self.splits_path,   # shared split
+        )
 
 
 def build_run_paths(model: str, output_root: Path | str | None = None) -> RunPaths:

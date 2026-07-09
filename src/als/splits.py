@@ -1,19 +1,26 @@
 """
-Canonical subject-level data splitting.
+Canonical subject-level data splitting (held-out test + 5-fold CV).
 
 Every stage of every model (CNN training, feature extraction, ViT training,
 nnMamba training, evaluation, Grad-CAM) reads the same ``splits.json`` artifact
 so there is no cross-stage leakage and the two models are compared on the
-*identical* train/val/test partition. Produce it once with ``write_splits``,
-reuse forever.
+*identical* partition. Produce it once with ``write_splits``, reuse forever.
 
 Split semantics:
-  - Multi-visit subjects (V1/V2/V3, run-02 reruns) are grouped by subject_id
-    so every visit of a subject lands in the same split.
+  - One stratified, subject-level **held-out TEST set** (``test_ratio``, default
+    20%) is carved out once and never used for training or threshold tuning.
+  - The remaining subjects form ``n_folds`` (default 5) **stratified folds**.
+    Fold ``k`` supplies the validation set; the other ``n_folds-1`` folds are
+    that fold's training set. So each fold is a train/val split and there are
+    ``n_folds`` of them, all sharing the one fixed test set.
+  - Multi-visit subjects (V1/V2/V3, run-02 reruns) are grouped by subject_id so
+    every visit of a subject lands in the same partition (no patient leakage).
   - Stratification is by label (control / patient), and by site when at least
-    two sites are present and each site has enough subjects per class.
-  - Splits are reproducible: ``splits.json`` records the seed, ratios, and per-
-    split subject lists, so the file itself is the contract.
+    two sites are present and each site has enough subjects per class. Within
+    each stratification bucket the CV-pool subjects are distributed round-robin
+    across folds, which keeps class balance near-identical across folds.
+  - Splits are reproducible: ``splits.json`` records the seed, ratios, fold
+    count, and per-fold / test subject lists, so the file itself is the contract.
 
 Folder/file naming assumptions:
   - Subject IDs look like ``C005``, ``P110`` (one letter + digits).
@@ -86,54 +93,58 @@ def label_from_subject_id(subject_id: str) -> float:
 
 # ─── Splitter ──────────────────────────────────────────────────────────────
 
-def _split_group(group: List[str], ratios: tuple[float, float, float], rng: random.Random) -> tuple[List[str], List[str], List[str]]:
-    """Shuffle a flat list of subject IDs and chop it by `ratios`."""
+def _peel_test_and_fold(
+    group: List[str], n_folds: int, test_ratio: float, rng: random.Random
+) -> tuple[List[str], List[List[str]]]:
+    """Split one stratification bucket into (test_subjects, [fold0..fold_{n-1}]).
+
+    A ``test_ratio`` fraction is peeled off for the shared held-out test set;
+    the remaining "CV pool" subjects are distributed round-robin across the
+    ``n_folds`` folds so every fold gets a near-equal share of this bucket's
+    class (and site). Round-robin keeps per-fold class balance tight even for
+    small buckets.
+    """
     ids = list(group)
     rng.shuffle(ids)
     n = len(ids)
-    n_train = int(n * ratios[0])
-    n_val = int(n * ratios[1])
-
-    # Ensure each split has at least 1 subject when n >= 3.
-    if n >= 3:
-        n_train = max(1, n_train)
-        n_val = max(1, n_val)
-        n_test = max(1, n - n_train - n_val)
-        while n_train + n_val + n_test > n:
-            if n_train >= n_val and n_train >= n_test and n_train > 1:
-                n_train -= 1
-            elif n_val >= n_test and n_val > 1:
-                n_val -= 1
-            elif n_test > 1:
-                n_test -= 1
-        return ids[:n_train], ids[n_train:n_train + n_val], ids[n_train + n_val:n_train + n_val + n_test]
-
-    # Tiny groups: best-effort partition.
-    n_train = max(1, n_train) if n > 0 else 0
-    n_val = min(n - n_train, max(0, n_val))
-    return ids[:n_train], ids[n_train:n_train + n_val], ids[n_train + n_val:]
+    n_test = int(round(n * test_ratio))
+    # Never consume the whole bucket for test — the CV pool must stay non-empty.
+    if n >= 2:
+        n_test = min(n_test, n - 1)
+    test = ids[:n_test]
+    pool = ids[n_test:]
+    folds: List[List[str]] = [[] for _ in range(n_folds)]
+    for i, sid in enumerate(pool):
+        folds[i % n_folds].append(sid)
+    return test, folds
 
 
 def make_subject_splits(
     samples: Sequence[SampleMeta],
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
+    *,
+    n_folds: int = 5,
+    test_ratio: float = 0.2,
     seed: int = 42,
     stratify_by_site: bool = True,
 ) -> dict:
     """
-    Build subject-level stratified splits.
+    Build subject-level stratified splits: one held-out test set + ``n_folds``
+    train/val folds over the remaining subjects.
 
     Returns
     -------
     dict with keys:
-      - 'seed', 'train_ratio', 'val_ratio'
-      - 'train_subjects', 'val_subjects', 'test_subjects' (lists of subject IDs)
-      - 'train_samples', 'val_samples', 'test_samples'   (lists of sample IDs)
-      - 'class_counts'                                    (per split, per label)
+      - 'seed', 'n_folds', 'test_ratio', 'stratify_by_site'
+      - 'test_subjects', 'test_samples'
+      - 'folds'  : list of ``n_folds`` dicts, each with
+                   'fold', 'train_subjects', 'val_subjects',
+                   'train_samples', 'val_samples'
+      - 'class_counts' : {'test': {...}, 'folds': [{'train':.., 'val':..}, ...]}
     """
-    if not (0.0 < train_ratio < 1.0 and 0.0 <= val_ratio < 1.0 and train_ratio + val_ratio < 1.0):
-        raise ValueError("Ratios must satisfy 0<train<1, 0<=val<1, train+val<1.")
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be >= 2, got {n_folds}.")
+    if not (0.0 <= test_ratio < 1.0):
+        raise ValueError(f"test_ratio must satisfy 0<=test_ratio<1, got {test_ratio}.")
 
     # Group subject IDs by (label, site). Site is optional.
     subject_to_label: dict[str, float] = {}
@@ -146,15 +157,15 @@ def make_subject_splits(
         subject_to_site.setdefault(s.subject_id, s.site)
         subject_to_samples[s.subject_id].append(s.sample_id)
 
-    # Decide whether to stratify by site: only if every (label, site) bucket
-    # has at least 3 subjects (so each split can be non-empty). Otherwise fall
-    # back to label-only stratification.
+    # Decide whether to stratify by site: only if every (label, site) bucket has
+    # enough subjects to fill the test set plus every fold. Otherwise fall back
+    # to label-only stratification.
     use_site = False
     if stratify_by_site and any(v is not None for v in subject_to_site.values()):
         per_bucket = defaultdict(list)
         for sid, lab in subject_to_label.items():
             per_bucket[(lab, subject_to_site[sid])].append(sid)
-        use_site = all(len(v) >= 3 for v in per_bucket.values()) and len(per_bucket) > 2
+        use_site = all(len(v) >= n_folds + 1 for v in per_bucket.values()) and len(per_bucket) > 2
 
     buckets: dict[tuple, list[str]] = defaultdict(list)
     for sid, lab in subject_to_label.items():
@@ -162,20 +173,19 @@ def make_subject_splits(
         buckets[key].append(sid)
 
     rng = random.Random(seed)
-    train_subjects: list[str] = []
-    val_subjects: list[str] = []
     test_subjects: list[str] = []
+    fold_subjects: list[list[str]] = [[] for _ in range(n_folds)]
 
     # Iterate in a deterministic order regardless of dict insertion.
     for key in sorted(buckets.keys(), key=lambda k: tuple(str(x) for x in k)):
-        tr, va, te = _split_group(buckets[key], (train_ratio, val_ratio, 1.0 - train_ratio - val_ratio), rng)
-        train_subjects.extend(tr)
-        val_subjects.extend(va)
-        test_subjects.extend(te)
+        test_b, folds_b = _peel_test_and_fold(buckets[key], n_folds, test_ratio, rng)
+        test_subjects.extend(test_b)
+        for k in range(n_folds):
+            fold_subjects[k].extend(folds_b[k])
 
-    train_subjects.sort()
-    val_subjects.sort()
     test_subjects.sort()
+    for k in range(n_folds):
+        fold_subjects[k].sort()
 
     def _samples_in(subset: Iterable[str]) -> list[str]:
         out: list[str] = []
@@ -189,21 +199,32 @@ def make_subject_splits(
             c["patient" if subject_to_label[sid] == 1.0 else "control"] += 1
         return c
 
+    folds: list[dict] = []
+    for k in range(n_folds):
+        val = fold_subjects[k]
+        train = sorted(sid for j in range(n_folds) if j != k for sid in fold_subjects[j])
+        folds.append({
+            "fold": k,
+            "train_subjects": train,
+            "val_subjects": list(val),
+            "train_samples": _samples_in(train),
+            "val_samples": _samples_in(val),
+        })
+
     return {
         "seed": seed,
-        "train_ratio": train_ratio,
-        "val_ratio": val_ratio,
+        "n_folds": n_folds,
+        "test_ratio": test_ratio,
         "stratify_by_site": use_site,
-        "train_subjects": train_subjects,
-        "val_subjects": val_subjects,
         "test_subjects": test_subjects,
-        "train_samples": _samples_in(train_subjects),
-        "val_samples": _samples_in(val_subjects),
         "test_samples": _samples_in(test_subjects),
+        "folds": folds,
         "class_counts": {
-            "train": _class_counts(train_subjects),
-            "val": _class_counts(val_subjects),
             "test": _class_counts(test_subjects),
+            "folds": [
+                {"train": _class_counts(f["train_subjects"]), "val": _class_counts(f["val_subjects"])}
+                for f in folds
+            ],
         },
     }
 
@@ -223,18 +244,35 @@ def read_splits(path: Path | str) -> dict:
     return json.loads(Path(path).read_text())
 
 
-def indices_from_split(samples: Sequence[SampleMeta], splits: dict, kind: str) -> list[int]:
+def n_folds_in(splits: dict) -> int:
+    """Number of CV folds recorded in a splits dict."""
+    return int(splits.get("n_folds", len(splits.get("folds", []))))
+
+
+def indices_from_split(
+    samples: Sequence[SampleMeta], splits: dict, kind: str, fold: Optional[int] = None
+) -> list[int]:
     """
-    Return integer indices into `samples` that belong to `kind ∈ {train,val,test}`.
+    Return integer indices into `samples` that belong to `kind`.
+
+    - ``kind == "test"``  → the one shared held-out test set (``fold`` ignored).
+    - ``kind in {"train", "val"}`` → that partition of fold ``fold`` (required).
 
     Splits are matched by subject_id (not sample_id), so adding visits to a
-    subject later still lands them in the correct split without rewriting
+    subject later still lands them in the correct partition without rewriting
     splits.json.
     """
-    key = {"train": "train_subjects", "val": "val_subjects", "test": "test_subjects"}.get(kind)
-    if key is None:
+    if kind == "test":
+        subjects = set(splits["test_subjects"])
+    elif kind in ("train", "val"):
+        if fold is None:
+            raise ValueError(f"kind={kind!r} requires a fold index.")
+        folds = splits.get("folds", [])
+        if not (0 <= fold < len(folds)):
+            raise ValueError(f"fold {fold} out of range (n_folds={len(folds)}).")
+        subjects = set(folds[fold][f"{kind}_subjects"])
+    else:
         raise ValueError(f"kind must be one of train/val/test, got {kind!r}")
-    subjects = set(splits[key])
     return [i for i, s in enumerate(samples) if s.subject_id in subjects]
 
 
@@ -242,22 +280,23 @@ def load_or_build_splits(
     samples: Sequence[SampleMeta],
     splits_path: Path | str,
     *,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
+    n_folds: int = 5,
+    test_ratio: float = 0.2,
     seed: int = 42,
     stratify_by_site: bool = True,
 ) -> dict:
-    """Read `splits_path` if present, else compute a stratified split and write it.
+    """Read `splits_path` if present, else compute the CV split and write it.
 
-    The first stage that runs creates the shared file; every other stage and
-    both models reuse it. This is the single guarantee that ``cnn_vit`` and
-    ``cnn_nnmamba`` are evaluated on the same held-out subjects.
+    The first stage that runs creates the shared file; every other stage, every
+    fold, and both models reuse it. This is the single guarantee that
+    ``cnn_vit`` and ``cnn_nnmamba`` are trained and evaluated on the same folds
+    and the same held-out test subjects.
     """
     splits_path = Path(splits_path)
     if splits_path.exists():
         return read_splits(splits_path)
     splits = make_subject_splits(
-        samples, train_ratio=train_ratio, val_ratio=val_ratio,
+        samples, n_folds=n_folds, test_ratio=test_ratio,
         seed=seed, stratify_by_site=stratify_by_site,
     )
     write_splits(splits_path, splits)
