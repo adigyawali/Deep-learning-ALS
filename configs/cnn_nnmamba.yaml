@@ -7,8 +7,12 @@ data:
   data_dir: null                # null -> Data/processed
   target_shape: [128, 128, 128]
   use_frequency: true           # false -> 3 spatial channels only (clean ablation)
-  aug_level: medium
+  aug_level: heavy              # FALLBACK preset only — the root config.yaml `augmentations:`
+                                # section overrides this when present (single source of truth).
 
+# FALLBACK only. Augmentations AND folds are configured in the root config.yaml
+# (`augmentations:` and `cross_validation:`), which overrides this `split:` block
+# whenever config.yaml is present. Kept so the pipeline still works without it.
 split:
   n_folds: 5                    # 5-fold stratified CV over the 80% CV pool
   test_ratio: 0.2               # fixed, subject-level held-out test set
@@ -20,21 +24,32 @@ dataloader:
   persistent_workers: true
 
 nnmamba:
+  # ── Spatial stream ──────────────────────────────────────────────────────
+  # 'pretrained' = MedicalNet 3D-ResNet transfer learning (recommended: the main
+  #   fix for the train->test overfitting gap on this small dataset).
+  # 'scratch'    = original from-scratch Encoder3D (use for the ablation).
+  spatial_encoder: pretrained
+  backbone: resnet18            # resnet{10,18,34,50}; smaller = less overfit / less VRAM
+  freeze_backbone: true         # freeze the pretrained stem; train only fusion+Mamba+head
+  pretrained_d_model: 256       # fused spatial embedding width (pretrained path only)
+  # ── Scratch-stream sizing (used when spatial_encoder: scratch; also sizes the
+  #    frequency stream, which is always trained from scratch) ───────────────
   base: 32                      # base conv width (doubles per downsample block, capped at 256)
   blocks: 3                     # number of stride-2 downsample blocks
   token_grid: 4                 # adaptive-pool grid -> token_grid^3 Mamba tokens (bounds memory)
   mamba_layers: 2
   d_state: 16
-  dropout: 0.1
+  dropout: 0.3                  # raised from 0.1: stronger regularisation for small data
   epochs: 100
   batch_size: 2
   grad_accum_steps: 2           # effective batch 4 at low per-step VRAM
   lr: 1.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 0.05            # raised from 1e-4: AdamW decoupled decay, small-data regime
   warmup_epochs: 5
 
 train:
   best_metric: roc_auc
+  label_smoothing: 0.1          # soften targets: curbs over-confident memorisation, improves calibration
   early_stop_patience: 20
   clip_grad: 1.0
   amp: bf16

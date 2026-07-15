@@ -91,6 +91,77 @@ def label_from_subject_id(subject_id: str) -> float:
     raise ValueError(f"Cannot infer label from subject_id={subject_id!r}")
 
 
+# ─── Shared indexing + payload assembly ────────────────────────────────────
+
+def _index_subjects(samples: Sequence[SampleMeta]):
+    """Group samples by subject → (label, site, sample-id list) lookups."""
+    subject_to_label: dict[str, float] = {}
+    subject_to_site: dict[str, Optional[str]] = {}
+    subject_to_samples: dict[str, list[str]] = defaultdict(list)
+    for s in samples:
+        # First sample wins for label/site (they must agree across visits anyway).
+        subject_to_label.setdefault(s.subject_id, s.label)
+        subject_to_site.setdefault(s.subject_id, s.site)
+        subject_to_samples[s.subject_id].append(s.sample_id)
+    return subject_to_label, subject_to_site, subject_to_samples
+
+
+def _assemble_splits(
+    *,
+    subject_to_label: dict[str, float],
+    subject_to_samples: dict[str, list[str]],
+    test_subjects: list[str],
+    fold_subjects: list[list[str]],
+    meta: dict,
+) -> dict:
+    """Build the canonical splits dict (shared by the auto and explicit builders).
+
+    ``meta`` carries the descriptive keys that differ between the two builders
+    (``mode``, ``seed``, ``test_ratio``, ``stratify_by_site``); the fold/test
+    structure and class-count bookkeeping are identical, so they live here.
+    """
+    n_folds = len(fold_subjects)
+
+    def _samples_in(subset: Iterable[str]) -> list[str]:
+        out: list[str] = []
+        for sid in subset:
+            out.extend(subject_to_samples.get(sid, []))
+        return sorted(out)
+
+    def _class_counts(subset: Iterable[str]) -> dict[str, int]:
+        c = {"control": 0, "patient": 0}
+        for sid in subset:
+            c["patient" if subject_to_label[sid] == 1.0 else "control"] += 1
+        return c
+
+    folds: list[dict] = []
+    for k in range(n_folds):
+        val = fold_subjects[k]
+        train = sorted(sid for j in range(n_folds) if j != k for sid in fold_subjects[j])
+        folds.append({
+            "fold": k,
+            "train_subjects": train,
+            "val_subjects": list(val),
+            "train_samples": _samples_in(train),
+            "val_samples": _samples_in(val),
+        })
+
+    return {
+        **meta,
+        "n_folds": n_folds,
+        "test_subjects": list(test_subjects),
+        "test_samples": _samples_in(test_subjects),
+        "folds": folds,
+        "class_counts": {
+            "test": _class_counts(test_subjects),
+            "folds": [
+                {"train": _class_counts(f["train_subjects"]), "val": _class_counts(f["val_subjects"])}
+                for f in folds
+            ],
+        },
+    }
+
+
 # ─── Splitter ──────────────────────────────────────────────────────────────
 
 def _peel_test_and_fold(
@@ -147,15 +218,7 @@ def make_subject_splits(
         raise ValueError(f"test_ratio must satisfy 0<=test_ratio<1, got {test_ratio}.")
 
     # Group subject IDs by (label, site). Site is optional.
-    subject_to_label: dict[str, float] = {}
-    subject_to_site: dict[str, Optional[str]] = {}
-    subject_to_samples: dict[str, list[str]] = defaultdict(list)
-
-    for s in samples:
-        # First sample wins for label/site (they must agree across visits anyway).
-        subject_to_label.setdefault(s.subject_id, s.label)
-        subject_to_site.setdefault(s.subject_id, s.site)
-        subject_to_samples[s.subject_id].append(s.sample_id)
+    subject_to_label, subject_to_site, subject_to_samples = _index_subjects(samples)
 
     # Decide whether to stratify by site: only if every (label, site) bucket has
     # enough subjects to fill the test set plus every fold. Otherwise fall back
@@ -187,46 +250,88 @@ def make_subject_splits(
     for k in range(n_folds):
         fold_subjects[k].sort()
 
-    def _samples_in(subset: Iterable[str]) -> list[str]:
-        out: list[str] = []
-        for sid in subset:
-            out.extend(subject_to_samples.get(sid, []))
-        return sorted(out)
+    return _assemble_splits(
+        subject_to_label=subject_to_label,
+        subject_to_samples=subject_to_samples,
+        test_subjects=test_subjects,
+        fold_subjects=fold_subjects,
+        meta={"mode": "auto", "seed": seed, "test_ratio": test_ratio, "stratify_by_site": use_site},
+    )
 
-    def _class_counts(subset: Iterable[str]) -> dict[str, int]:
-        c = {"control": 0, "patient": 0}
-        for sid in subset:
-            c["patient" if subject_to_label[sid] == 1.0 else "control"] += 1
-        return c
 
-    folds: list[dict] = []
-    for k in range(n_folds):
-        val = fold_subjects[k]
-        train = sorted(sid for j in range(n_folds) if j != k for sid in fold_subjects[j])
-        folds.append({
-            "fold": k,
-            "train_subjects": train,
-            "val_subjects": list(val),
-            "train_samples": _samples_in(train),
-            "val_samples": _samples_in(val),
-        })
+def make_splits_from_explicit(
+    samples: Sequence[SampleMeta],
+    *,
+    test_subjects: Sequence[str],
+    folds: Sequence[Sequence[str]],
+    seed: int = 42,
+) -> dict:
+    """Build splits from explicit, config-supplied patient-ID lists.
 
-    return {
-        "seed": seed,
-        "n_folds": n_folds,
-        "test_ratio": test_ratio,
-        "stratify_by_site": use_site,
-        "test_subjects": test_subjects,
-        "test_samples": _samples_in(test_subjects),
-        "folds": folds,
-        "class_counts": {
-            "test": _class_counts(test_subjects),
-            "folds": [
-                {"train": _class_counts(f["train_subjects"]), "val": _class_counts(f["val_subjects"])}
-                for f in folds
-            ],
-        },
-    }
+    No randomness: the folds are exactly what the caller lists. Used by
+    ``cross_validation.mode: explicit`` in ``config.yaml`` so supervisor-approved
+    splits are reproduced verbatim. Produces the *same* schema as
+    ``make_subject_splits`` so every downstream stage is unchanged.
+
+    Validation:
+      * a subject may appear in **at most one** place (test or exactly one fold) —
+        an overlap raises ``ValueError`` (it would be data leakage);
+      * IDs listed but absent from the data are ignored with a warning;
+      * subjects present in the data but listed nowhere are DROPPED with a loud
+        warning (so a partial split is visible, never silent).
+    IDs are matched case-insensitively (upper-cased), like ``extract_subject_id``.
+    """
+    subject_to_label, _subject_to_site, subject_to_samples = _index_subjects(samples)
+    known = set(subject_to_label)
+
+    def _norm(ids: Sequence[str]) -> list[str]:
+        return [str(x).strip().upper() for x in (ids or [])]
+
+    test = _norm(test_subjects)
+    fold_lists = [_norm(f) for f in (folds or [])]
+    if not fold_lists:
+        raise ValueError(
+            "cross_validation.mode is 'explicit' but no 'folds' were provided in config.yaml."
+        )
+
+    # Reject any subject assigned to more than one partition.
+    assigned: dict[str, str] = {}
+    for sid in test:
+        assigned[sid] = "test_subjects"
+    for k, fl in enumerate(fold_lists):
+        for sid in fl:
+            if sid in assigned:
+                raise ValueError(
+                    f"Subject {sid} is listed in both {assigned[sid]} and folds[{k}] in "
+                    f"config.yaml cross_validation — each subject may appear only once."
+                )
+            assigned[sid] = f"folds[{k}]"
+
+    configured_missing = sorted(sid for sid in assigned if sid not in known)
+    if configured_missing:
+        head = configured_missing[:10]
+        print(f"[splits] WARNING: {len(configured_missing)} configured subject(s) are not in the "
+              f"data and were ignored: {head}{' ...' if len(configured_missing) > 10 else ''}")
+
+    unassigned = sorted(known - set(assigned))
+    if unassigned:
+        head = unassigned[:10]
+        print(f"[splits] WARNING: {len(unassigned)} subject(s) present in the data are not listed "
+              f"in config.yaml and will be DROPPED (never trained or evaluated): "
+              f"{head}{' ...' if len(unassigned) > 10 else ''}")
+
+    test_known = [sid for sid in test if sid in known]
+    fold_known = [[sid for sid in fl if sid in known] for fl in fold_lists]
+    n_total = len(known)
+    return _assemble_splits(
+        subject_to_label=subject_to_label,
+        subject_to_samples=subject_to_samples,
+        test_subjects=test_known,
+        fold_subjects=fold_known,
+        meta={"mode": "explicit", "seed": seed,
+              "test_ratio": round(len(test_known) / n_total, 4) if n_total else 0.0,
+              "stratify_by_site": False},
+    )
 
 
 # ─── IO ────────────────────────────────────────────────────────────────────
@@ -301,6 +406,55 @@ def load_or_build_splits(
     )
     write_splits(splits_path, splits)
     return splits
+
+
+def resolve_splits(
+    samples: Sequence[SampleMeta],
+    splits_path: Path | str,
+    *,
+    cv_cfg: Optional[dict] = None,
+    split_cfg: Optional[dict] = None,
+    seed: int = 42,
+) -> dict:
+    """Single entry point every stage uses to obtain the CV splits.
+
+    ``cv_cfg`` is the ``cross_validation`` section of the root ``config.yaml``
+    (the source of truth). ``split_cfg`` is the legacy per-model ``split:`` block,
+    used only as a fallback for ``n_folds`` / ``test_ratio`` when ``cv_cfg`` omits
+    them.
+
+      * ``mode: explicit`` → build the folds verbatim from the configured
+        patient-ID lists and (over)write ``splits.json`` every run, since the
+        config — not a cached file — is authoritative.
+      * ``mode: auto`` (default) → reproducible stratified generation, cached in
+        ``splits.json`` (read if it already exists).
+    """
+    cv = dict(cv_cfg or {})
+    sp = dict(split_cfg or {})
+    mode = str(cv.get("mode", "auto")).lower()
+
+    if mode == "explicit":
+        splits = make_splits_from_explicit(
+            samples,
+            test_subjects=cv.get("test_subjects", []),
+            folds=cv.get("folds", []),
+            seed=int(cv.get("seed", seed)),
+        )
+        write_splits(splits_path, splits)
+        return splits
+
+    if mode != "auto":
+        raise ValueError(
+            f"cross_validation.mode must be 'auto' or 'explicit', got {mode!r} (config.yaml)."
+        )
+
+    return load_or_build_splits(
+        samples, splits_path,
+        n_folds=int(cv.get("n_folds", sp.get("n_folds", 5))),
+        test_ratio=float(cv.get("test_ratio", sp.get("test_ratio", 0.2))),
+        seed=int(cv.get("seed", seed)),
+        stratify_by_site=bool(cv.get("stratify_by_site", sp.get("stratify_by_site", True))),
+    )
 
 
 # ─── Convenience for callers that hand in raw dicts ────────────────────────

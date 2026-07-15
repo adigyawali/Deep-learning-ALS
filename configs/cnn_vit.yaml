@@ -5,8 +5,11 @@ seed: 42
 data:
   data_dir: null                # null -> Data/processed
   target_shape: [128, 128, 128]
-  aug_level: medium
+  aug_level: medium             # FALLBACK preset only — root config.yaml `augmentations:` overrides.
 
+# FALLBACK only. Augmentations AND folds are configured in the root config.yaml
+# (`augmentations:` and `cross_validation:`), which overrides this `split:` block
+# whenever config.yaml is present. Kept so the pipeline still works without it.
 split:
   n_folds: 5                    # 5-fold stratified CV over the 80% CV pool
   test_ratio: 0.2               # fixed, subject-level held-out test set

@@ -11,7 +11,7 @@ from ..config import get
 from ..data.feature_dataset import ALSSpatialFeatureDataset, compute_pos_weight, indices_from
 from ..models.cnn_vit import SpatialMultiModalViT
 from ..paths import RunPaths
-from ..splits import load_or_build_splits, n_folds_in
+from ..splits import n_folds_in, read_splits, resolve_splits
 from ..training import trainer
 from ..training.optim import amp_dtype_from_str, warmup_cosine_scheduler
 from ._common import make_loader, smoke_trim, vit_forward
@@ -21,10 +21,13 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     v = cfg["vit"]
     dl = cfg.get("dataloader", {})
 
-    # Splits are shared across folds; build (or read) them once. Any fold's
-    # feature metadata is enough — subjects are keyed by id, not by fold.
-    splits = None
-    n_folds = get(cfg, "split", "n_folds", default=5)
+    # Splits are shared across folds and were written by extract_features; read
+    # them once to learn the fold count (honours explicit folds from config.yaml).
+    # Any fold's feature metadata is enough — subjects are keyed by id, not fold.
+    splits = read_splits(paths.splits_path) if paths.splits_path.exists() else None
+    n_folds = n_folds_in(splits) if splits else int(
+        get(cfg, "cross_validation", "n_folds",
+            default=get(cfg, "split", "n_folds", default=5)))
 
     for fold in range(n_folds):
         fpaths = paths.fold(fold).ensure()
@@ -35,10 +38,9 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             continue
 
         if splits is None:
-            splits = load_or_build_splits(
+            splits = resolve_splits(
                 dataset.to_sample_meta(), paths.splits_path,
-                n_folds=n_folds,
-                test_ratio=get(cfg, "split", "test_ratio", default=0.2),
+                cv_cfg=cfg.get("cross_validation"), split_cfg=cfg.get("split"),
                 seed=cfg.get("seed", 42),
             )
 

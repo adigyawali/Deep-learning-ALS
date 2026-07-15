@@ -66,3 +66,22 @@ def test_missing_modality_skipped(tmp_path: Path):
 def test_compute_freq_shape_and_finite():
     freq = compute_freq_magnitude(torch.randn(3, 12, 12, 12))
     assert freq.shape == (3, 12, 12, 12) and bool(torch.isfinite(freq).all())
+
+
+def test_aug_config_disabled_builds_no_transforms(tmp_path: Path):
+    _subject(tmp_path, "C001_V1")
+    ds = VolumeDataset(tmp_path, return_mode="stack", target_shape=(16, 16, 16),
+                       transform=True, aug_config={"enabled": False})
+    assert ds._geom is None and ds._intensity is None
+
+
+def test_aug_config_routes_transform_by_group(tmp_path: Path):
+    _subject(tmp_path, "C001_V1")
+    cfg = {"enabled": True, "transforms": [
+        {"name": "RandFlip", "group": "geometric", "params": {"prob": 0.5, "spatial_axis": 0}},
+    ]}
+    ds = VolumeDataset(tmp_path, return_mode="stack", target_shape=(16, 16, 16),
+                       transform=True, aug_config=cfg)
+    (vol, _) = ds[0]
+    assert vol.shape[0] == 3           # spatial-only stack still shaped correctly
+    assert ds._geom is not None and ds._intensity is None

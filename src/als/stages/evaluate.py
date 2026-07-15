@@ -75,6 +75,9 @@ def _load_fold_target(cfg: dict, paths: RunPaths, fold: int, device, shared_ds):
         use_frequency=bool(get(cfg, "data", "use_frequency", default=True)),
         base=mc.get("base", 32), blocks=mc.get("blocks", 3), token_grid=mc.get("token_grid", 4),
         mamba_layers=mc.get("mamba_layers", 2), d_state=mc.get("d_state", 16), dropout=mc.get("dropout", 0.1),
+        spatial_encoder=mc.get("spatial_encoder", "scratch"), backbone=mc.get("backbone", "resnet18"),
+        freeze_backbone=mc.get("freeze_backbone", True), pretrained_d_model=mc.get("pretrained_d_model", 256),
+        load_pretrained=False,  # the checkpoint carries the backbone weights; no download needed
     ).to(device)
     model.load_state_dict(blob["model_state_dict"])
     model.eval()
@@ -140,6 +143,13 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     test_site_by_id: dict[str, str] = {}
     best_val_metric_name = None
     best_val_metrics: list[float] = []
+    # Pooled out-of-fold (OOF) validation predictions: each CV-pool subject lands
+    # in exactly one validation fold, so concatenating them yields one ~N_cv-sized
+    # held-out prediction set. It gives a single, low-variance threshold and CV
+    # estimate — far more stable than averaging five thresholds tuned on ~70
+    # samples each (which previously swung 0.12–0.65 across folds).
+    oof_labels: list[int] = []
+    oof_probs: list[float] = []
 
     for fold in range(n_folds):
         target = _load_fold_target(cfg, paths, fold, device, shared_ds)
@@ -159,6 +169,8 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         if val_idx:
             v_labels, v_probs = _infer(dataset, val_idx, forward_fn, model, device, cfg)
             val_metrics_per_fold.append(M.binary_metrics(v_labels, v_probs, threshold=thr))
+            oof_labels.extend(int(v) for v in v_labels)
+            oof_probs.extend(v_probs)
 
         # Fixed held-out TEST metrics for this fold's model.
         test_idx = indices_from_split(meta, splits, "test")
@@ -179,6 +191,21 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         print("[eval] no trained folds found. Train the model first.")
         return
 
+    # ── Pooled out-of-fold estimate (the primary CV number + shared threshold) ─
+    bootstrap_n = int(get(cfg, "eval", "bootstrap_n", default=2000))
+    oof = None
+    oof_threshold = float(statistics.fmean(fold_thresholds))  # fallback if OOF is empty
+    if oof_labels and (0 in oof_labels and 1 in oof_labels):
+        oof_threshold = float(M.youden_threshold(oof_labels, oof_probs))
+        oof = M.binary_metrics(oof_labels, oof_probs, threshold=oof_threshold)
+        oof.update({
+            "roc_auc_bootstrap_95ci": list(M.bootstrap_auc_ci(
+                oof_labels, oof_probs, n_boot=bootstrap_n, seed=cfg.get("seed", 42))),
+            "roc_auc_delong_95ci": list(M.delong_ci(oof_labels, oof_probs)),
+            "brier_score": M.brier(oof_labels, oof_probs),
+            "ece_10bin": M.expected_calibration_error(oof_labels, oof_probs, n_bins=10),
+        })
+
     # ── CV summary (validation folds) ──────────────────────────────────────
     cv_summary = {
         "model": cfg["model"],
@@ -186,17 +213,24 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         "best_val_metric_name": best_val_metric_name,
         "best_val_metric_mean": float(statistics.fmean(best_val_metrics)) if best_val_metrics else None,
         "best_val_metric_std": float(statistics.pstdev(best_val_metrics)) if len(best_val_metrics) > 1 else 0.0,
+        # Pooled OOF is the headline CV estimate; per-fold mean±std is kept for the
+        # spread. Both are reported so the two are never confused.
+        "oof_threshold": oof_threshold,
+        "oof_num_samples": len(oof_labels),
+        "oof_metrics": oof,
+        "per_fold_thresholds": fold_thresholds,
         "val_metrics_mean_std": _aggregate(val_metrics_per_fold),
         "val_metrics_per_fold": val_metrics_per_fold,
     }
 
     # ── Held-out test: per-fold spread + mean-probability ensemble ──────────
-    ens_threshold = float(statistics.fmean(fold_thresholds))
+    # Use the single pooled-OOF threshold (stable) rather than the mean of five
+    # per-fold thresholds tuned on ~70 samples each. Never tuned on the test set.
+    ens_threshold = oof_threshold
     common_ids = sorted(set.intersection(*[set(d) for d in test_prob_by_fold])) if test_prob_by_fold else []
     ens_labels = [test_label_by_id[i] for i in common_ids]
     ens_probs = [float(statistics.fmean(d[i] for d in test_prob_by_fold)) for i in common_ids]
 
-    bootstrap_n = int(get(cfg, "eval", "bootstrap_n", default=2000))
     ensemble = M.binary_metrics(ens_labels, ens_probs, threshold=ens_threshold)
     ensemble.update({
         "roc_auc_bootstrap_95ci": list(M.bootstrap_auc_ci(ens_labels, ens_probs, n_boot=bootstrap_n, seed=cfg.get("seed", 42))),
@@ -236,7 +270,12 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     ))
 
     print(f"--- {cfg['model']} cross-validated evaluation ---")
-    print("[eval] CV (val folds):", json.dumps(cv_summary["val_metrics_mean_std"].get("roc_auc", {}), indent=2))
+    print("[eval] CV (per-fold mean±std):",
+          json.dumps(cv_summary["val_metrics_mean_std"].get("roc_auc", {}), indent=2))
+    if oof is not None:
+        print(f"[eval] CV (pooled OOF, n={len(oof_labels)}): "
+              f"roc_auc={oof['roc_auc']:.3f}  bal_acc={oof['balanced_accuracy']:.3f}  "
+              f"thr={oof_threshold:.2f}  ece={oof['ece_10bin']:.3f}")
     print("[eval] TEST ensemble:", json.dumps({k: v for k, v in ensemble.items()
                                                if k not in ("confusion_matrix",)}, indent=2))
     print(f"[eval] saved {paths.metrics / 'cv_summary.json'}")

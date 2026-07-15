@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--num-workers", type=int, default=None)
+    # ablation overrides (cnn_nnmamba)
+    p.add_argument("--spatial-encoder", choices=["scratch", "pretrained"], default=None,
+                   help="nnMamba spatial stream: 'pretrained' (MedicalNet transfer) or 'scratch'.")
+    p.add_argument("--no-frequency", action="store_true",
+                   help="Disable the FFT frequency stream (use_frequency=false ablation).")
     # preprocess passthrough
     p.add_argument("--nonlinear", action="store_true", help="SyN T1→MNI registration (preprocess).")
     p.add_argument("--limit", type=int, default=0, help="Limit preprocessed triplets (debug).")
@@ -97,6 +102,10 @@ def main() -> int:
                                  lr=args.lr, num_workers=args.num_workers)
     if args.data_dir:
         cfg.setdefault("data", {})["data_dir"] = args.data_dir
+    if args.no_frequency:
+        cfg.setdefault("data", {})["use_frequency"] = False
+    if args.spatial_encoder and model == "cnn_nnmamba":
+        cfg.setdefault("nnmamba", {})["spatial_encoder"] = args.spatial_encoder
     if args.smoke:
         cfg = cfgmod.apply_smoke(cfg)
         # Smoke must never block on a network weight download.

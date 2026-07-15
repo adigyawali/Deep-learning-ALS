@@ -17,6 +17,11 @@ import yaml
 from .paths import PROJECT_ROOT
 
 CONFIG_DIR = PROJECT_ROOT / "configs"
+# Single, shared, root-level source of truth for data augmentations and K-fold
+# splits (see config.yaml). Merged into every model's config below.
+ROOT_CONFIG = PROJECT_ROOT / "config.yaml"
+# Sections owned by the root config; if present there, they win over the model YAML.
+_ROOT_SECTIONS = ("augmentations", "cross_validation")
 
 
 def load_config(model: str, path: str | Path | None = None) -> dict:
@@ -26,7 +31,26 @@ def load_config(model: str, path: str | Path | None = None) -> dict:
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
     cfg["model"] = model
     cfg["_config_path"] = str(cfg_path)
+    _merge_root_config(cfg)
     return cfg
+
+
+def _merge_root_config(cfg: dict) -> None:
+    """Overlay the root ``config.yaml``'s augmentation + CV sections onto ``cfg``.
+
+    Keeping augmentations and folds in one shared file (not duplicated per model)
+    makes it the single place to edit, and guarantees both models train on the
+    identical augmentation policy and the identical folds. Absent file/section →
+    the model YAML's own ``data.aug_level`` / ``split`` fallbacks are used, so
+    older setups keep working.
+    """
+    if not ROOT_CONFIG.exists():
+        return
+    root = yaml.safe_load(ROOT_CONFIG.read_text()) or {}
+    for section in _ROOT_SECTIONS:
+        if section in root and root[section] is not None:
+            cfg[section] = root[section]
+    cfg["_root_config_path"] = str(ROOT_CONFIG)
 
 
 def _train_section(cfg: dict) -> dict:
@@ -73,13 +97,20 @@ def apply_smoke(cfg: dict) -> dict:
     cfg.setdefault("dataloader", {})["num_workers"] = 0
     cfg.setdefault("eval", {})["bootstrap_n"] = 50
     cfg.setdefault("train", {})["early_stop_patience"] = 99
-    # Keep the CV wiring exercised but fast: 2 folds instead of 5.
+    # A wiring check must not depend on the real config.yaml: disable augmentation
+    # (fast, deterministic) and force auto 2-fold CV so any explicit patient-ID
+    # folds (which name real subjects) don't apply to the tiny smoke subset.
+    cfg["augmentations"] = {"enabled": False}
+    cfg["cross_validation"] = {"mode": "auto", "n_folds": 2, "test_ratio": 0.2}
     cfg.setdefault("split", {})["n_folds"] = 2
     if cfg["model"] == "cnn_vit":
         cfg["cnn"].update({"backbone": "resnet10", "epochs": 2, "batch_size": 2, "freeze_backbone": False})
         cfg["vit"].update({"embed_dim": 32, "depth": 2, "num_heads": 2, "epochs": 2, "batch_size": 2})
     else:
-        cfg["nnmamba"].update({"base": 8, "blocks": 2, "token_grid": 2, "mamba_layers": 1,
+        # Force the from-scratch stem: a wiring check must stay fast and must not
+        # depend on a MedicalNet download (the pretrained path has its own test).
+        cfg["nnmamba"].update({"spatial_encoder": "scratch",
+                               "base": 8, "blocks": 2, "token_grid": 2, "mamba_layers": 1,
                                "epochs": 2, "batch_size": 2, "grad_accum_steps": 1})
     return cfg
 

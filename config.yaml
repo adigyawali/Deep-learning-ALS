@@ -1,0 +1,106 @@
+# ============================================================================
+# EXPERIMENT CONFIG — the single source of truth for DATA AUGMENTATIONS and
+# K-FOLD CROSS-VALIDATION SPLITS. Shared by BOTH models (cnn_vit, cnn_nnmamba).
+#
+# You should NOT need to touch any Python to change augmentations or folds —
+# edit this file only. (Model architecture / training hyper-parameters live in
+# configs/<model>.yaml; only augmentations + folds live here.)
+#
+# When training starts, the pipeline reads this file automatically.
+# ============================================================================
+
+
+# ── DATA AUGMENTATION ───────────────────────────────────────────────────────
+# Applied to the TRAINING data only. Validation and test data are NEVER
+# augmented. Augmentations are applied in the order listed.
+augmentations:
+  enabled: true            # master switch. false = train with NO augmentation.
+
+  # Each list item is one augmentation:
+  #   name    : any class from monai.transforms — e.g. RandFlip, RandAffine,
+  #             RandGaussianNoise, RandAdjustContrast, RandBiasField,
+  #             RandGaussianSmooth, RandRotate, RandZoom, RandCoarseDropout, ...
+  #   enabled : true / false — turn this one on or off WITHOUT deleting it.
+  #   group   : "geometric" or "intensity"  (READ THE NOTE BELOW — it matters).
+  #   params  : keyword arguments passed straight to that MONAI transform.
+  #
+  # To ADD an augmentation: copy a block, change name/params. To REMOVE one:
+  # delete its block (or set enabled: false). No code changes needed.
+  #
+  # ┌── NOTE on "group" (important for co-registered multi-modal MRI) ─────────┐
+  # │ geometric = transforms that MOVE voxels (flip, affine, rotate, zoom,     │
+  # │   translate). Applied ONCE to T1/T2/FLAIR together so they stay aligned, │
+  # │   and BEFORE the frequency (FFT) channels are computed.                  │
+  # │ intensity = transforms that change voxel VALUES only (noise, contrast,   │
+  # │   bias field, blur). Applied AFTER the frequency channels are computed.  │
+  # │ Rule of thumb: does it move the image? -> geometric. Does it only change │
+  # │   pixel values? -> intensity. When unsure, use intensity.                │
+  # └──────────────────────────────────────────────────────────────────────────┘
+  transforms:
+    - name: RandFlip                    # left-right (sagittal) flip; brain is ~symmetric
+      enabled: true
+      group: geometric
+      params: {prob: 0.5, spatial_axis: 0}
+
+    - name: RandAffine                  # small shift / rotation / scale (positioning variation)
+      enabled: true
+      group: geometric
+      params:
+        prob: 0.7
+        translate_range: [3, 3, 3]
+        rotate_range: [0.087, 0.087, 0.087]   # radians (~5 degrees)
+        scale_range: [0.1, 0.1, 0.1]
+        padding_mode: border
+
+    - name: RandGaussianNoise           # thermal / Rician noise proxy
+      enabled: true
+      group: intensity
+      params: {prob: 0.3, std: 0.05}
+
+    - name: RandAdjustContrast          # gamma contrast jitter
+      enabled: true
+      group: intensity
+      params: {prob: 0.3, gamma: [0.7, 1.5]}
+
+    - name: RandBiasField               # smooth RF/coil intensity inhomogeneity (MRI-specific)
+      enabled: true
+      group: intensity
+      params: {prob: 0.3, coeff_range: [0.0, 0.1]}
+
+    - name: RandGaussianSmooth          # resolution / partial-volume variation
+      enabled: false                    # example: disabled but kept for easy re-enabling
+      group: intensity
+      params: {prob: 0.15, sigma_x: [0.5, 1.0], sigma_y: [0.5, 1.0], sigma_z: [0.5, 1.0]}
+
+
+# ── K-FOLD CROSS-VALIDATION SPLITS ──────────────────────────────────────────
+cross_validation:
+  # mode: auto     -> generate stratified, subject-level folds automatically.
+  #                   Reproducible from 'seed'. Good default.
+  # mode: explicit -> use EXACTLY the patient IDs you list below. Nothing is
+  #                   randomised — the folds are what you write. Use this for
+  #                   supervisor-approved / reproducible splits.
+  mode: auto
+
+  # ---- settings used when mode: auto ----
+  n_folds: 5
+  test_ratio: 0.2          # fraction of subjects held out as the fixed test set
+  seed: 42
+  stratify_by_site: true
+
+  # ---- settings used when mode: explicit ----
+  # Set mode: explicit above, then fill these in. IDs are patient/subject IDs
+  # (e.g. C001, P042), matched case-insensitively. Rules:
+  #   * every subject may appear in AT MOST ONE place (test OR exactly one fold);
+  #   * an ID not found in the data is ignored (with a warning);
+  #   * a subject present in the data but listed nowhere is DROPPED (with a loud
+  #     warning) — list every subject you want used.
+  # The number of folds is simply the number of lists under 'folds:'.
+  #
+  # test_subjects: [C001, C002, P001, P002]
+  # folds:
+  #   - [C010, C011, P010, P011]      # fold 0 validation subjects
+  #   - [C012, C013, P012, P013]      # fold 1 validation subjects
+  #   - [C014, C015, P014, P015]      # fold 2 validation subjects
+  #   - [C016, C017, P016, P017]      # fold 3 validation subjects
+  #   - [C018, C019, P018, P019]      # fold 4 validation subjects

@@ -18,7 +18,7 @@ from ..config import get
 from ..data.volume_dataset import VolumeDataset
 from ..models.cnn_encoder import ALSTriStreamClassifier
 from ..paths import DEFAULT_DATA_DIR, RunPaths
-from ..splits import load_or_build_splits, n_folds_in
+from ..splits import n_folds_in, resolve_splits
 
 
 def _load_cnn(model: torch.nn.Module, ckpt_path, device) -> bool:
@@ -85,10 +85,9 @@ def run(cfg: dict, paths: RunPaths, device: torch.device, *, allow_missing_check
         return
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
-    splits = load_or_build_splits(
+    splits = resolve_splits(
         dataset.to_sample_meta(), paths.splits_path,
-        n_folds=get(cfg, "split", "n_folds", default=5),
-        test_ratio=get(cfg, "split", "test_ratio", default=0.2),
+        cv_cfg=cfg.get("cross_validation"), split_cfg=cfg.get("split"),
         seed=cfg.get("seed", 42),
     )
     n_folds = n_folds_in(splits)

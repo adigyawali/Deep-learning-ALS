@@ -17,6 +17,12 @@ We therefore split augmentation into a *geometric* group (flip/affine, shared
 across channels) and an *intensity* group (noise/contrast, spatial channels
 only). The frequency channels are derived from the geometrically-augmented but
 intensity-clean volume — see ``compute_freq_magnitude`` for why that matters.
+
+Which augmentations run, and with what parameters, is **not** decided here: it
+comes from the ``augmentations`` section of the root ``config.yaml`` (passed in
+as ``aug_config``) and is turned into the two Compose pipelines by
+``als.data.augment.build_transforms``. Pass ``aug_config=None`` to fall back to a
+named preset via ``aug_level`` (the older behaviour).
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from scipy.ndimage import zoom
 from torch.utils.data import Dataset
 
 from ..splits import SampleMeta, extract_site, extract_subject_id, label_from_subject_id
+from .augment import build_transforms
 
 ReturnMode = Literal["tuple", "stack"]
 
@@ -70,6 +77,7 @@ class VolumeDataset(Dataset):
         use_mask: bool = True,
         use_frequency: bool = False,
         aug_level: str = "medium",
+        aug_config: dict | None = None,
     ):
         self.root_dir = Path(root_dir)
         self.return_mode = return_mode
@@ -78,8 +86,13 @@ class VolumeDataset(Dataset):
         self.use_mask = use_mask
         self.use_frequency = use_frequency
         self.aug_level = aug_level
+        self.aug_config = aug_config
         self.samples: list[dict] = []
-        self._geom, self._intensity = self._build_transforms() if transform else (None, None)
+        # Augmentations come from config (single source of truth); aug_level is a
+        # fallback preset only. Non-training datasets build nothing.
+        self._geom, self._intensity = (
+            build_transforms(aug_config, aug_level=aug_level) if transform else (None, None)
+        )
         self._prepare()
 
     # ── scanning ────────────────────────────────────────────────────────
@@ -181,60 +194,3 @@ class VolumeDataset(Dataset):
     @staticmethod
     def _as_tensor(x) -> torch.Tensor:
         return torch.as_tensor(np.asarray(x), dtype=torch.float32)
-
-    def _build_transforms(self):
-        """Return (geometric, intensity) Compose pairs, or (None, None) if MONAI is absent.
-
-        Choices follow 3D brain-MRI practice (nnU-Net / MONAI / TorchIO), not
-        generic vision:
-          * Geometric — only a left-right (axis-0, sagittal) flip plus a *small*
-            rigid-ish affine (few-voxel shift, ≤~5° rotation, ≤10% scale). The
-            brain is roughly L-R symmetric so the sagittal flip is anatomically
-            valid; the small affine models subject positioning / head-size
-            variation without warping pathology. All of these are sampled ONCE
-            and shared across T1/T2/FLAIR (caller applies to the stacked tensor),
-            so the modalities stay co-registered.
-          * Intensity (spatial channels only) — Gaussian noise (thermal/Rician
-            proxy), gamma contrast, and **RandBiasField**, which simulates the
-            smooth RF/coil intensity inhomogeneity that is specific to and
-            ubiquitous in MRI; a light Gaussian smooth (medium/heavy) models
-            resolution / partial-volume variation across scanners. These are
-            applied AFTER the frequency channels are computed, so they never
-            corrupt the FFT stream (see ``compute_freq_magnitude``).
-        """
-        try:
-            from monai.transforms import (
-                Compose, RandAdjustContrast, RandAffine, RandBiasField, RandFlip,
-                RandGaussianNoise, RandGaussianSmooth,
-            )
-        except ImportError:
-            return None, None
-
-        if self.aug_level == "light":
-            geom = [RandFlip(prob=0.5, spatial_axis=0),
-                    RandAffine(prob=0.5, rotate_range=(0.1, 0.1, 0.1),
-                               scale_range=(0.05, 0.05, 0.05), padding_mode="border")]
-            inten = [RandGaussianNoise(prob=0.2, std=0.03),
-                     RandBiasField(prob=0.2, coeff_range=(0.0, 0.05))]
-        elif self.aug_level == "heavy":
-            geom = [RandFlip(prob=0.5, spatial_axis=0), RandFlip(prob=0.5, spatial_axis=1),
-                    RandFlip(prob=0.5, spatial_axis=2),
-                    RandAffine(prob=0.8, translate_range=(4, 4, 4),
-                               rotate_range=(0.2, 0.2, 0.2), scale_range=(0.15, 0.15, 0.15),
-                               padding_mode="border")]
-            inten = [RandGaussianNoise(prob=0.4, std=0.07),
-                     RandAdjustContrast(prob=0.4, gamma=(0.6, 1.6)),
-                     RandBiasField(prob=0.4, coeff_range=(0.0, 0.15)),
-                     RandGaussianSmooth(prob=0.2, sigma_x=(0.5, 1.5),
-                                        sigma_y=(0.5, 1.5), sigma_z=(0.5, 1.5))]
-        else:  # medium (default)
-            geom = [RandFlip(prob=0.5, spatial_axis=0),
-                    RandAffine(prob=0.7, translate_range=(3, 3, 3),
-                               rotate_range=(0.087, 0.087, 0.087), scale_range=(0.1, 0.1, 0.1),
-                               padding_mode="border")]
-            inten = [RandGaussianNoise(prob=0.3, std=0.05),
-                     RandAdjustContrast(prob=0.3, gamma=(0.7, 1.5)),
-                     RandBiasField(prob=0.3, coeff_range=(0.0, 0.1)),
-                     RandGaussianSmooth(prob=0.15, sigma_x=(0.5, 1.0),
-                                        sigma_y=(0.5, 1.0), sigma_z=(0.5, 1.0))]
-        return Compose(geom), Compose(inten)

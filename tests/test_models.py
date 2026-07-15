@@ -62,3 +62,31 @@ def test_nnmamba_with_frequency():
     assert out.shape == (2, 1)
     # spatial-only model must not accept frequency channels through the spatial slice silently:
     assert m.freq is not None
+
+
+def test_nnmamba_rejects_bad_spatial_encoder():
+    try:
+        CNNnnMamba(spatial_encoder="nonsense")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for unknown spatial_encoder")
+
+
+def test_nnmamba_pretrained_encoder_frozen_backbone():
+    # conftest sets ALS_SKIP_PRETRAINED=1 so this builds a random (offline) resnet18.
+    m = CNNnnMamba(use_frequency=True, spatial_encoder="pretrained", backbone="resnet18",
+                   freeze_backbone=True, pretrained_d_model=32, token_grid=2, mamba_layers=1)
+    out = m(torch.randn(2, 6, 24, 24, 24))
+    out.sum().backward()
+    assert out.shape == (2, 1) and torch.isfinite(out).all()
+    # Frozen MedicalNet stem: no grad on the backbone, grad on the trainable head.
+    assert all(p.grad is None for p in m.spatial.backbone.parameters())
+    assert all(not p.requires_grad for p in m.spatial.backbone.parameters())
+    assert all(p.grad is not None for p in m.head.parameters())
+
+
+def test_nnmamba_pretrained_encoder_unfrozen_trains_backbone():
+    m = CNNnnMamba(use_frequency=False, spatial_encoder="pretrained", backbone="resnet10",
+                   freeze_backbone=False, pretrained_d_model=32, token_grid=2, mamba_layers=1)
+    m(torch.randn(1, 3, 24, 24, 24)).sum().backward()
+    assert any(p.grad is not None for p in m.spatial.backbone.parameters())

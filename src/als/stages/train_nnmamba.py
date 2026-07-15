@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from torch.utils.data import Subset
 
 from .. import sanity
@@ -12,9 +11,11 @@ from ..data.volume_dataset import VolumeDataset
 from ..models.cnn_nnmamba import CNNnnMamba
 from ..models.components.mamba_block import MAMBA_BACKEND
 from ..paths import DEFAULT_DATA_DIR, RunPaths
-from ..splits import indices_from_split, load_or_build_splits, n_folds_in
+from ..splits import indices_from_split, n_folds_in, resolve_splits
 from ..training import trainer
-from ..training.optim import amp_dtype_from_str, pos_weight_from_labels, warmup_cosine_scheduler
+from ..training.optim import (
+    SmoothBCEWithLogitsLoss, amp_dtype_from_str, pos_weight_from_labels, warmup_cosine_scheduler,
+)
 from ._common import make_loader, smoke_trim, volume_forward
 
 
@@ -23,8 +24,13 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
     use_frequency = bool(get(cfg, "data", "use_frequency", default=True))
     aug_level = get(cfg, "data", "aug_level", default="medium")
+    aug_config = cfg.get("augmentations")   # from root config.yaml (source of truth)
     m = cfg["nnmamba"]
-    print(f"[nnmamba] Mamba backend: {MAMBA_BACKEND}  use_frequency={use_frequency}")
+    spatial_encoder = m.get("spatial_encoder", "scratch")
+    print(f"[nnmamba] Mamba backend: {MAMBA_BACKEND}  use_frequency={use_frequency}  "
+          f"spatial_encoder={spatial_encoder}"
+          + (f" (backbone={m.get('backbone', 'resnet18')}, "
+             f"freeze={m.get('freeze_backbone', True)})" if spatial_encoder == "pretrained" else ""))
 
     full = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
                          transform=False, use_frequency=use_frequency)
@@ -32,12 +38,12 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         print(f"[nnmamba] Error: fewer than 3 samples in {data_dir}.")
         return
     train_aug = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
-                              transform=True, use_frequency=use_frequency, aug_level=aug_level)
+                              transform=True, use_frequency=use_frequency,
+                              aug_level=aug_level, aug_config=aug_config)
 
-    splits = load_or_build_splits(
+    splits = resolve_splits(
         full.to_sample_meta(), paths.splits_path,
-        n_folds=get(cfg, "split", "n_folds", default=5),
-        test_ratio=get(cfg, "split", "test_ratio", default=0.2),
+        cv_cfg=cfg.get("cross_validation"), split_cfg=cfg.get("split"),
         seed=cfg.get("seed", 42),
     )
     meta = full.to_sample_meta()
@@ -64,10 +70,16 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             use_frequency=use_frequency, base=m.get("base", 32), blocks=m.get("blocks", 3),
             token_grid=m.get("token_grid", 4), mamba_layers=m.get("mamba_layers", 2),
             d_state=m.get("d_state", 16), dropout=m.get("dropout", 0.1),
+            spatial_encoder=spatial_encoder, backbone=m.get("backbone", "resnet18"),
+            freeze_backbone=m.get("freeze_backbone", True),
+            pretrained_d_model=m.get("pretrained_d_model", 256),
         ).to(device)
 
         pw = pos_weight_from_labels([meta[i].label for i in train_idx])
-        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pw, dtype=torch.float32, device=device))
+        criterion = SmoothBCEWithLogitsLoss(
+            pos_weight=torch.tensor(pw, dtype=torch.float32, device=device),
+            smoothing=get(cfg, "train", "label_smoothing", default=0.0),
+        ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=m["lr"], weight_decay=m["weight_decay"])
         scheduler = warmup_cosine_scheduler(optimizer, m["epochs"], m.get("warmup_epochs", 5))
 

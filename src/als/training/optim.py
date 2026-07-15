@@ -4,6 +4,31 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SmoothBCEWithLogitsLoss(nn.Module):
+    """BCE-with-logits + optional label smoothing, keeping ``pos_weight`` support.
+
+    Label smoothing pulls the hard targets {0,1} toward 0.5 by ``smoothing``
+    (target ← target·(1−s) + 0.5·s). On a small dataset this discourages the
+    over-confident, memorised logits that drive the train→test overfitting gap,
+    and improves probability calibration (lower ECE). ``smoothing=0`` reduces to
+    plain ``BCEWithLogitsLoss`` so it is a safe default drop-in.
+    """
+
+    def __init__(self, pos_weight: torch.Tensor | None = None, smoothing: float = 0.0):
+        super().__init__()
+        if not (0.0 <= smoothing < 1.0):
+            raise ValueError(f"smoothing must be in [0,1), got {smoothing}")
+        self.smoothing = float(smoothing)
+        self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self.smoothing > 0.0:
+            targets = targets * (1.0 - self.smoothing) + 0.5 * self.smoothing
+        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=self.pos_weight)
 
 
 def amp_dtype_from_str(name: str, device: torch.device) -> torch.dtype | None:
