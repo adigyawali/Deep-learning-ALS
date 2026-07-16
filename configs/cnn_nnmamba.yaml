@@ -29,7 +29,8 @@ nnmamba:
   #   fix for the train->test overfitting gap on this small dataset).
   # 'scratch'    = original from-scratch Encoder3D (use for the ablation).
   spatial_encoder: pretrained
-  backbone: resnet18            # resnet{10,18,34,50}; smaller = less overfit / less VRAM
+  backbone: resnet10            # resnet10 or resnet50 (the only sizes with downloadable
+                                # MedicalNet weights). resnet10 = smaller / less VRAM / less overfit.
   freeze_backbone: true         # freeze the pretrained stem; train only fusion+Mamba+head
   pretrained_d_model: 256       # fused spatial embedding width (pretrained path only)
   # ── Scratch-stream sizing (used when spatial_encoder: scratch; also sizes the

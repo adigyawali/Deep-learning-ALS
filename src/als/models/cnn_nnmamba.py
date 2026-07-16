@@ -110,7 +110,7 @@ class PretrainedSpatialEncoder(nn.Module):
 
     def __init__(
         self,
-        backbone: str = "resnet18",
+        backbone: str = "resnet10",
         d_model: int = 256,
         token_grid: int = 4,
         mamba_layers: int = 2,
@@ -160,7 +160,7 @@ class CNNnnMamba(nn.Module):
         d_state: int = 16,
         dropout: float = 0.1,
         spatial_encoder: str = "scratch",
-        backbone: str = "resnet18",
+        backbone: str = "resnet10",
         freeze_backbone: bool = True,
         pretrained_d_model: int = 256,
         load_pretrained: bool = True,

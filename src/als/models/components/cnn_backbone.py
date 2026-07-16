@@ -2,9 +2,11 @@
 3D CNN backbone (MONAI ResNet, MedicalNet-pretrained) for one MRI modality.
 
 Med3D / MedicalNet (Chen et al. 2019) pretrained 3D ResNets on 23 medical
-datasets including brain MRI. We expose ``resnet{10,18,34,50}`` so the backbone
-size is a single configurable knob — the first lever to pull when the tri-stream
-encoder (three of these live at once) runs the GPU out of memory.
+datasets including brain MRI. We expose ``resnet10`` and ``resnet50`` — the only
+two sizes for which the ``Warvito/MedicalNet-models`` torch.hub repo publishes
+the 23-dataset weights (there is no downloadable resnet18/34). ``resnet10`` is
+the smaller/lighter choice; ``resnet50`` the larger. Pick with the ``backbone``
+knob — the first lever to pull when the encoder runs the GPU out of memory.
 
 Contract:
   * input  : ``(B, 1, D, H, W)`` z-scored single-modality volume
@@ -26,7 +28,7 @@ import torch
 import torch.nn as nn
 
 try:
-    from monai.networks.nets import resnet10, resnet18, resnet34, resnet50
+    from monai.networks.nets import resnet10, resnet50
     _MONAI_AVAILABLE = True
 except ImportError:
     _MONAI_AVAILABLE = False
@@ -35,14 +37,15 @@ FEATURE_DIM = 512
 MEDICALNET_HUB = "Warvito/MedicalNet-models"
 
 # MONAI constructor + MedicalNet hub entrypoint + layer4/avgpool channel width.
+# Only resnet10 / resnet50 are listed: those are the sizes for which the hub repo
+# actually publishes 23-dataset weights (resnet18/34 have no downloadable weights,
+# so requesting them would fail the torch.hub download).
 _BACKBONES = {
     "resnet10": ("resnet10", "medicalnet_resnet10_23datasets", 512),
-    "resnet18": ("resnet18", "medicalnet_resnet18_23datasets", 512),
-    "resnet34": ("resnet34", "medicalnet_resnet34_23datasets", 512),
     "resnet50": ("resnet50", "medicalnet_resnet50_23datasets", 2048),
 }
-_CTORS = {"resnet10": lambda **k: resnet10(**k), "resnet18": lambda **k: resnet18(**k),
-          "resnet34": lambda **k: resnet34(**k), "resnet50": lambda **k: resnet50(**k)} if _MONAI_AVAILABLE else {}
+_CTORS = {"resnet10": lambda **k: resnet10(**k),
+          "resnet50": lambda **k: resnet50(**k)} if _MONAI_AVAILABLE else {}
 
 
 def backbone_out_channels(backbone: str) -> int:
@@ -129,7 +132,7 @@ def _load_medicalnet_weights(backbone: nn.Module, hub_model: str) -> None:
 
 
 def build_medicalnet_backbone(
-    backbone: str = "resnet18", *, freeze: bool = True, load_pretrained: bool = True,
+    backbone: str = "resnet10", *, freeze: bool = True, load_pretrained: bool = True,
 ) -> tuple[nn.Module, int]:
     """Build a MONAI 3D ResNet, load MedicalNet weights, return ``(module, out_ch)``.
 

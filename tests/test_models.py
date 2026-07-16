@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from als.models.cnn_nnmamba import CNNnnMamba
@@ -73,8 +74,8 @@ def test_nnmamba_rejects_bad_spatial_encoder():
 
 
 def test_nnmamba_pretrained_encoder_frozen_backbone():
-    # conftest sets ALS_SKIP_PRETRAINED=1 so this builds a random (offline) resnet18.
-    m = CNNnnMamba(use_frequency=True, spatial_encoder="pretrained", backbone="resnet18",
+    # conftest sets ALS_SKIP_PRETRAINED=1 so this builds a random (offline) resnet10.
+    m = CNNnnMamba(use_frequency=True, spatial_encoder="pretrained", backbone="resnet10",
                    freeze_backbone=True, pretrained_d_model=32, token_grid=2, mamba_layers=1)
     out = m(torch.randn(2, 6, 24, 24, 24))
     out.sum().backward()
@@ -90,3 +91,12 @@ def test_nnmamba_pretrained_encoder_unfrozen_trains_backbone():
                    freeze_backbone=False, pretrained_d_model=32, token_grid=2, mamba_layers=1)
     m(torch.randn(1, 3, 24, 24, 24)).sum().backward()
     assert any(p.grad is not None for p in m.spatial.backbone.parameters())
+
+
+def test_only_downloadable_backbones_are_allowed():
+    # resnet18/34 have no MedicalNet hub weights; asking for one must fail fast
+    # (clear ValueError) rather than later blowing up on a missing hub entrypoint.
+    from als.models.components.cnn_backbone import _BACKBONES, build_medicalnet_backbone
+    assert set(_BACKBONES) == {"resnet10", "resnet50"}
+    with pytest.raises(ValueError, match="backbone must be one of"):
+        build_medicalnet_backbone("resnet18", load_pretrained=False)

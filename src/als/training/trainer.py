@@ -37,7 +37,7 @@ _OOM_HELP = (
     "  Try, in rough order of effectiveness:\n"
     "   * lower batch_size (and raise grad_accum_steps to keep the effective batch)\n"
     "   * raise grad_accum_steps alone\n"
-    "   * use a smaller cnn_backbone (resnet18/resnet34) or smaller target_shape\n"
+    "   * use a smaller cnn_backbone (resnet10) or smaller target_shape\n"
     "   * reduce num_workers / prefetch_factor (frees host RAM, not VRAM)\n"
     "   * keep amp_dtype=bf16 (the default on CUDA)\n"
 )

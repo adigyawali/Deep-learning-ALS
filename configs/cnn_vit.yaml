@@ -22,7 +22,7 @@ dataloader:
 
 # Stage 1 — tri-stream 3D CNN (the memory-heavy stage).
 cnn:
-  backbone: resnet50            # resnet10 | resnet18 | resnet34 | resnet50  (smaller = less VRAM)
+  backbone: resnet50            # resnet10 | resnet50  (only sizes with MedicalNet weights; resnet10 = less VRAM)
   freeze_backbone: false
   epochs: 60
   batch_size: 4

@@ -75,7 +75,7 @@ def _load_fold_target(cfg: dict, paths: RunPaths, fold: int, device, shared_ds):
         use_frequency=bool(get(cfg, "data", "use_frequency", default=True)),
         base=mc.get("base", 32), blocks=mc.get("blocks", 3), token_grid=mc.get("token_grid", 4),
         mamba_layers=mc.get("mamba_layers", 2), d_state=mc.get("d_state", 16), dropout=mc.get("dropout", 0.1),
-        spatial_encoder=mc.get("spatial_encoder", "scratch"), backbone=mc.get("backbone", "resnet18"),
+        spatial_encoder=mc.get("spatial_encoder", "scratch"), backbone=mc.get("backbone", "resnet10"),
         freeze_backbone=mc.get("freeze_backbone", True), pretrained_d_model=mc.get("pretrained_d_model", 256),
         load_pretrained=False,  # the checkpoint carries the backbone weights; no download needed
     ).to(device)

@@ -29,7 +29,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     spatial_encoder = m.get("spatial_encoder", "scratch")
     print(f"[nnmamba] Mamba backend: {MAMBA_BACKEND}  use_frequency={use_frequency}  "
           f"spatial_encoder={spatial_encoder}"
-          + (f" (backbone={m.get('backbone', 'resnet18')}, "
+          + (f" (backbone={m.get('backbone', 'resnet10')}, "
              f"freeze={m.get('freeze_backbone', True)})" if spatial_encoder == "pretrained" else ""))
 
     full = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
@@ -70,7 +70,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             use_frequency=use_frequency, base=m.get("base", 32), blocks=m.get("blocks", 3),
             token_grid=m.get("token_grid", 4), mamba_layers=m.get("mamba_layers", 2),
             d_state=m.get("d_state", 16), dropout=m.get("dropout", 0.1),
-            spatial_encoder=spatial_encoder, backbone=m.get("backbone", "resnet18"),
+            spatial_encoder=spatial_encoder, backbone=m.get("backbone", "resnet10"),
             freeze_backbone=m.get("freeze_backbone", True),
             pretrained_d_model=m.get("pretrained_d_model", 256),
         ).to(device)
