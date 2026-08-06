@@ -34,6 +34,7 @@ from als.data.preprocessing import (
     _pick_dir,
     find_triplets,
 )
+from als.splits import extract_site, label_from_subject_id
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,7 +87,38 @@ def main(argv: list[str] | None = None) -> int:
         total_unmatched += len(unmatched)
 
     print("=== pairing ===")
-    find_triplets(*[d for _, d, _ in modalities])
+    triplets = find_triplets(*[d for _, d, _ in modalities])
+
+    # Splits are subject-level, so the subject count — not the sample count — is
+    # what decides whether 5-fold CV is stable. Report it before any ANTs work.
+    if triplets:
+        by_subject: dict[str, int] = Counter(t1.subject_id for t1, _, _ in triplets)
+        labels = Counter()
+        sites = Counter()
+        for t1, _, _ in triplets:
+            sites[extract_site(t1.sample_id) or "UNK"] += 1
+        for sid in by_subject:
+            try:
+                labels["patient" if label_from_subject_id(sid) == 1.0 else "control"] += 1
+            except ValueError:
+                labels["UNKNOWN"] += 1
+        cohort_subjects = Counter(sid.split("_")[0] for sid in by_subject)
+        visits = Counter(by_subject.values())
+
+        print()
+        print("=== subjects (what the splitter actually sees) ===")
+        print(f"  samples          : {len(triplets)}")
+        print(f"  unique subjects  : {len(by_subject)}")
+        print(f"  labels           : {dict(labels)}")
+        print(f"  cohorts          : {dict(cohort_subjects)}")
+        print(f"  sites (samples)  : {dict(sites)}")
+        print("  timepoints/subject: "
+              + ", ".join(f"{n} subj x {k} tp" for k, n in sorted(visits.items())))
+        n_sub = len(by_subject)
+        if n_sub:
+            print(f"  -> a 20% test set is ~{round(n_sub * 0.2)} subjects; "
+                  f"each of 5 folds validates on ~{round(n_sub * 0.8 / 5)}")
+
     if total_unmatched:
         print(f"\nNOTE: {total_unmatched} file(s) the parser could not read. Ignore entries like "
               f".DS_Store or a pure-PD scan; anything else means a naming convention the "
