@@ -2,9 +2,6 @@
 # EXPERIMENT CONFIG — the single source of truth for DATA AUGMENTATIONS and
 # K-FOLD CROSS-VALIDATION SPLITS. Shared by BOTH models (cnn_vit, cnn_nnmamba).
 #
-# You should NOT need to touch any Python to change augmentations or folds —
-# edit this file only. (Model architecture / training hyper-parameters live in
-# configs/<model>.yaml; only augmentations + folds live here.)
 #
 # When training starts, the pipeline reads this file automatically.
 # ============================================================================
@@ -15,6 +12,37 @@
 # augmented. Augmentations are applied in the order listed.
 augmentations:
   enabled: true            # master switch. false = train with NO augmentation.
+
+  # ── MIXUP (batch-level, so it is NOT in the transforms list below) ─────────
+  # Trains on convex combinations of pairs of subjects:
+  #     x~ = L*x_i + (1-L)*x_j        y~ = L*y_i + (1-L)*y_j      L ~ Beta(a, a)
+  # It needs two samples at once, so it cannot be a per-sample MONAI transform;
+  # it is applied by the trainer to each TRAINING batch just before the model
+  # forward. Validation and test are never mixed.
+  #
+  #   enabled : true / false. OFF by default so results stay comparable with
+  #             every run made before it existed. The master switch above also
+  #             turns it off.
+  #   alpha   : Beta shape. 0.2 (default) = mostly-mild mixing, the standard
+  #             small-dataset setting; ~0.4 mixes harder; large alpha pushes
+  #             every batch toward a 50/50 blend and will blur the anatomy.
+  #   prob    : fraction of training batches that get mixed at all (1.0 = all).
+  #
+  # Labels: the task is binary with one sigmoid output, so a mixed label is just
+  # a soft target in [0,1]. BCE is linear in the target, so this is exactly the
+  # usual "L*loss(y_i) + (1-L)*loss(y_j)" formulation, and it keeps pos_weight
+  # class balancing and train.label_smoothing working unchanged.
+  #
+  # Notes: T1/T2/FLAIR are mixed with the SAME partner and the SAME L, so the
+  # modalities stay a coherent (blended) subject. Mixing happens on the 3-channel
+  # input, and cnn_nnmamba derives its frequency view from the CNN feature map
+  # *after* that, so the spectrum it sees is the spectrum of the blended subject
+  # rather than a blend of two spectra. While mixup is on the training ROC-AUC is
+  # reported as `nan` (soft targets); watch the validation numbers instead.
+  mixup:
+    enabled: false
+    alpha: 0.2
+    prob: 1.0
 
   # Each list item is one augmentation:
   #   name    : any class from monai.transforms — e.g. RandFlip, RandAffine,

@@ -7,16 +7,19 @@ class serves three consumers via ``return_mode``:
 
   * ``"tuple"``  → ``((t1, t2, flair), label)`` with each modality ``(1,D,H,W)``
                    — the tri-stream CNN encoder and feature extraction.
-  * ``"stack"``  → ``(volume, label)`` with ``volume`` ``(C,D,H,W)``
-                   — end-to-end nnMamba. ``C = 3`` (spatial) or ``6`` when
-                   ``use_frequency`` adds the FFT magnitude channels.
+  * ``"stack"``  → ``(volume, label)`` with ``volume`` ``(3,D,H,W)``
+                   — end-to-end nnMamba.
+
+Both modes hand over the three spatial modalities and nothing else. The nnMamba
+frequency stream is **not** built here: it is derived inside the model from the
+CNN feature map (see ``models/cnn_nnmamba.py``), so this dataset has no
+``use_frequency`` switch and never returns 6 channels.
 
 Multi-modal registration is sacred: T1/T2/FLAIR are co-registered, so any
 geometric augmentation is sampled ONCE and applied identically to all three.
-We therefore split augmentation into a *geometric* group (flip/affine, shared
-across channels) and an *intensity* group (noise/contrast, spatial channels
-only). The frequency channels are derived from the geometrically-augmented but
-intensity-clean volume — see ``compute_freq_magnitude`` for why that matters.
+Augmentation is still split into a *geometric* group (flip/affine, shared across
+channels) and an *intensity* group (noise/contrast), because that ordering keeps
+the modalities aligned; both now apply to the same 3-channel volume.
 
 Which augmentations run, and with what parameters, is **not** decided here: it
 comes from the ``augmentations`` section of the root ``config.yaml`` (passed in
@@ -42,28 +45,6 @@ from .augment import build_transforms
 ReturnMode = Literal["tuple", "stack"]
 
 
-def compute_freq_magnitude(x: torch.Tensor) -> torch.Tensor:
-    """Per-channel 3D FFT log-magnitude, fftshifted and z-scored.
-
-    Input  : ``(C, D, H, W)`` real spatial volume.
-    Output : ``(C, D, H, W)`` real frequency-magnitude volume.
-
-    Computed on the intensity-clean volume on purpose: random gamma/noise/bias
-    augmentations perturb the spectrum globally and non-linearly, which turned
-    the earlier 6-channel variant's frequency inputs into high-variance noise.
-    Keeping the FFT source clean (geometric aug only) is half the fix; feeding
-    these channels to a *separate* encoder (see ``models/cnn_nnmamba.py``)
-    rather than the shared spatial conv stem is the other half.
-    """
-    spectrum = torch.fft.fftn(x, dim=(-3, -2, -1))
-    mag = torch.log1p(torch.abs(spectrum))                 # compress DC-dominated range
-    mag = torch.fft.fftshift(mag, dim=(-3, -2, -1))        # zero-frequency to the centre
-    dims = (-3, -2, -1)
-    mean = mag.mean(dim=dims, keepdim=True)
-    std = mag.std(dim=dims, keepdim=True)
-    return ((mag - mean) / (std + 1e-6)).float()
-
-
 class VolumeDataset(Dataset):
     MODALITIES = ("t1", "t2", "flair")
 
@@ -75,7 +56,6 @@ class VolumeDataset(Dataset):
         target_shape: tuple[int, int, int] = (128, 128, 128),
         transform: bool = False,
         use_mask: bool = True,
-        use_frequency: bool = False,
         aug_level: str = "medium",
         aug_config: dict | None = None,
     ):
@@ -84,7 +64,6 @@ class VolumeDataset(Dataset):
         self.target_shape = tuple(target_shape)
         self.transform = transform
         self.use_mask = use_mask
-        self.use_frequency = use_frequency
         self.aug_level = aug_level
         self.aug_config = aug_config
         self.samples: list[dict] = []
@@ -104,10 +83,9 @@ class VolumeDataset(Dataset):
         skipped: list[tuple[str, str]] = []
         for folder in folders:
             name = folder.name
+            # subject_id is dataset-qualified (CALSNIC_C005 / CAPTURE_C178), so the
+            # label must come from the C/P token, not the first character.
             subject_id = extract_subject_id(name)
-            if not (subject_id.startswith("C") or subject_id.startswith("P")):
-                skipped.append((name, f"unrecognized subject id {subject_id!r}"))
-                continue
             try:
                 label = label_from_subject_id(subject_id)
             except ValueError as e:
@@ -177,16 +155,13 @@ class VolumeDataset(Dataset):
 
         label = torch.tensor(s["label"], dtype=torch.float32)
 
-        if self.return_mode == "stack":
-            freq = compute_freq_magnitude(spatial) if self.use_frequency else None
-            if self.transform and self._intensity is not None:
-                spatial = self._as_tensor(self._intensity(spatial))
-            volume = torch.cat([spatial, freq], dim=0) if freq is not None else spatial
-            return volume, label
-
-        # tuple mode (CNN): intensity aug on the spatial channels, then split.
         if self.transform and self._intensity is not None:
             spatial = self._as_tensor(self._intensity(spatial))
+
+        if self.return_mode == "stack":
+            return spatial, label                      # (3, D, H, W) — nnMamba
+
+        # tuple mode (CNN): split the stacked volume back into the three streams.
         t1, t2, fl = spatial[0:1], spatial[1:2], spatial[2:3]
         return (t1.contiguous(), t2.contiguous(), fl.contiguous()), label
 

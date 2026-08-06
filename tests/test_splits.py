@@ -25,8 +25,10 @@ from als.splits import (
 @pytest.mark.parametrize("name,expected", [
     ("C005_V1", "C005"),
     ("P110_V2_run-02", "P110"),
-    ("CALSNIC2_EDM_C005_V1", "C005"),
-    ("CALSNIC2_EDM_P110_V2_run-02", "P110"),
+    ("CALSNIC2_EDM_C005_V1", "CALSNIC_C005"),
+    ("CALSNIC2_EDM_P110_V2", "CALSNIC_P110"),
+    ("CAPTURE_CHU_C178_00M", "CAPTURE_C178"),
+    ("CAPTURE_EDM_P151_12M", "CAPTURE_P151"),
     ("c005_v1", "C005"),
 ])
 def test_extract_subject_id(name, expected):
@@ -35,14 +37,23 @@ def test_extract_subject_id(name, expected):
 
 def test_calsnic2_not_mistaken_for_subject():
     assert extract_subject_id("CALSNIC2_EDM_X_V1") == "CALSNIC2"
-    assert extract_subject_id("CALSNIC2_EDM_P096_V1") == "P096"
+    assert extract_subject_id("CALSNIC2_EDM_P096_V1") == "CALSNIC_P096"
+
+
+def test_cohorts_reusing_a_subject_number_stay_distinct():
+    """CALSNIC C003 and CAPTURE C003 are different people — never one subject."""
+    assert extract_subject_id("CALSNIC2_CAL_C003_V1") != extract_subject_id("CAPTURE_EDM_C003_00M")
 
 
 def test_site_and_label():
     assert extract_site("CALSNIC2_EDM_C005_V1") == "EDM"
+    assert extract_site("CAPTURE_CHU_C178_00M") == "CHU"
     assert extract_site("C005_V1") is None
     assert label_from_subject_id("C005") == 0.0
     assert label_from_subject_id("P110") == 1.0
+    # A dataset-qualified patient ID starts with "C" but is still a patient.
+    assert label_from_subject_id("CAPTURE_P151") == 1.0
+    assert label_from_subject_id("CALSNIC_C005") == 0.0
     with pytest.raises(ValueError):
         label_from_subject_id("X999")
 
@@ -138,6 +149,30 @@ def test_explicit_case_insensitive_ids():
                                    folds=[["p001", "C002"], ["P002", "c003"]])
     assert set(sp["test_subjects"]) == {"C001"}
     assert set(sp["folds"][0]["val_subjects"]) == {"P001", "C002"}
+
+
+def test_explicit_qualified_ids_target_one_cohort():
+    """Dataset-qualified IDs let the two cohorts go to different partitions."""
+    s = [SampleMeta("CALSNIC2_EDM_C001_V1", "CALSNIC_C001", 0.0, "EDM"),
+         SampleMeta("CAPTURE_CHU_C001_00M", "CAPTURE_C001", 0.0, "CHU"),
+         SampleMeta("CALSNIC2_EDM_P001_V1", "CALSNIC_P001", 1.0, "EDM"),
+         SampleMeta("CAPTURE_CHU_P001_00M", "CAPTURE_P001", 1.0, "CHU")]
+    sp = make_splits_from_explicit(
+        s, test_subjects=["CALSNIC_C001"],
+        folds=[["CAPTURE_C001"], ["CALSNIC_P001", "CAPTURE_P001"]],
+    )
+    assert sp["test_subjects"] == ["CALSNIC_C001"]
+    assert sp["folds"][0]["val_subjects"] == ["CAPTURE_C001"]
+
+
+def test_explicit_bare_token_matches_every_cohort():
+    """Pre-CAPTURE config files keep working: a bare C001 claims both cohorts."""
+    s = [SampleMeta("CALSNIC2_EDM_C001_V1", "CALSNIC_C001", 0.0, "EDM"),
+         SampleMeta("CAPTURE_CHU_C001_00M", "CAPTURE_C001", 0.0, "CHU"),
+         SampleMeta("CALSNIC2_EDM_P001_V1", "CALSNIC_P001", 1.0, "EDM")]
+    sp = make_splits_from_explicit(s, test_subjects=["C001"], folds=[["P001"], []])
+    assert set(sp["test_subjects"]) == {"CALSNIC_C001", "CAPTURE_C001"}
+    assert sp["folds"][0]["val_subjects"] == ["CALSNIC_P001"]
 
 
 def test_explicit_overlap_raises():

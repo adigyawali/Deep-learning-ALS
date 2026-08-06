@@ -132,7 +132,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         shared_ds = VolumeDataset(
             data_dir, return_mode="stack",
             target_shape=tuple(get(cfg, "data", "target_shape", default=[128, 128, 128])),
-            transform=False, use_frequency=bool(get(cfg, "data", "use_frequency", default=True)),
+            transform=False,
         )
 
     val_metrics_per_fold: list[dict] = []

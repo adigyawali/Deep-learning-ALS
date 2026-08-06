@@ -8,7 +8,7 @@ import nibabel as nib
 import numpy as np
 import torch
 
-from als.data.volume_dataset import VolumeDataset, compute_freq_magnitude
+from als.data.volume_dataset import VolumeDataset
 
 
 def _nifti(path: Path, shape=(24, 24, 24), seed=0):
@@ -24,13 +24,18 @@ def _subject(root: Path, sample_id: str, seed=0):
 
 def test_short_and_long_names_and_labels(tmp_path: Path):
     _subject(tmp_path, "C005_V1", 0)
-    _subject(tmp_path, "CALSNIC2_EDM_P096_V2_run-02", 3)
+    _subject(tmp_path, "CALSNIC2_EDM_P096_V2", 3)
+    _subject(tmp_path, "CAPTURE_CHU_P151_08M", 6)
     (tmp_path / "_QC_Snapshots").mkdir()
     ds = VolumeDataset(tmp_path, return_mode="tuple", target_shape=(16, 16, 16))
     by_id = {s["id"]: s for s in ds.samples}
     assert by_id["C005_V1"]["label"] == 0.0
-    assert by_id["CALSNIC2_EDM_P096_V2_run-02"]["subject_id"] == "P096"
-    assert by_id["CALSNIC2_EDM_P096_V2_run-02"]["label"] == 1.0
+    assert by_id["CALSNIC2_EDM_P096_V2"]["subject_id"] == "CALSNIC_P096"
+    assert by_id["CALSNIC2_EDM_P096_V2"]["label"] == 1.0
+    # CAPTURE: months timepoint, and a "CAPTURE_P..." id must still label as patient.
+    assert by_id["CAPTURE_CHU_P151_08M"]["subject_id"] == "CAPTURE_P151"
+    assert by_id["CAPTURE_CHU_P151_08M"]["site"] == "CHU"
+    assert by_id["CAPTURE_CHU_P151_08M"]["label"] == 1.0
 
 
 def test_tuple_mode_shapes(tmp_path: Path):
@@ -41,18 +46,12 @@ def test_tuple_mode_shapes(tmp_path: Path):
     assert float(y) == 0.0
 
 
-def test_stack_mode_spatial_only(tmp_path: Path):
+def test_stack_mode_is_always_three_spatial_channels(tmp_path: Path):
+    """The FFT view moved into the model, so the dataset never returns 6 channels."""
     _subject(tmp_path, "P001_V1")
-    ds = VolumeDataset(tmp_path, return_mode="stack", target_shape=(16, 16, 16), use_frequency=False)
+    ds = VolumeDataset(tmp_path, return_mode="stack", target_shape=(16, 16, 16))
     vol, y = ds[0]
     assert vol.shape == (3, 16, 16, 16) and float(y) == 1.0
-
-
-def test_stack_mode_with_frequency(tmp_path: Path):
-    _subject(tmp_path, "P002_V1")
-    ds = VolumeDataset(tmp_path, return_mode="stack", target_shape=(16, 16, 16), use_frequency=True)
-    vol, _ = ds[0]
-    assert vol.shape == (6, 16, 16, 16)
     assert bool(torch.isfinite(vol).all())
 
 
@@ -61,11 +60,6 @@ def test_missing_modality_skipped(tmp_path: Path):
     _nifti(tmp_path / "C001_V1" / "C001_V1_T2.nii.gz")  # FLAIR missing
     ds = VolumeDataset(tmp_path, return_mode="tuple", target_shape=(8, 8, 8))
     assert len(ds) == 0
-
-
-def test_compute_freq_shape_and_finite():
-    freq = compute_freq_magnitude(torch.randn(3, 12, 12, 12))
-    assert freq.shape == (3, 12, 12, 12) and bool(torch.isfinite(freq).all())
 
 
 def test_aug_config_disabled_builds_no_transforms(tmp_path: Path):

@@ -9,20 +9,36 @@ Pipeline per (subject, visit):
   5. Register FLAIR → T1 (rigid) and warp to MNI by composing transforms.
   6. Save the three MNI-space volumes and a QC montage.
 
+Two cohorts are supported, and they share one raw layout (`raw/T1W`, `raw/T2W`,
+`raw/FLAIR`, all subjects mixed together). They differ only in the trailing
+token of the filename:
+
+    CALSNIC : DATASET_SITE_SUBJECT_MODALITY_VISIT     CALSNIC2_EDM_C005_T1w10_V1
+    CAPTURE : DATASET_SITE_SUBJECT_MODALITY_MONTHS    CAPTURE_CHU_C178_T1w10_00M
+
+`V1/V2/V3` is a visit index; `00M/04M/08M/12M` is months since baseline. Both
+are treated as the same thing — the timepoint that keys the pairing — so a
+subject's timepoints stay distinct samples in either cohort.
+
 Pairing is subject-keyed (NOT sorted-zip). Each modality folder is scanned
-into a dict keyed by (subject_id, visit). A (subject, visit) is processed iff
-all three modalities are present. When multiple files exist for the same
-(subject, visit, modality) — e.g. `_run-02` reruns — the most recent rerun
-wins (highest run number), with no-suffix treated as run 0.
+into a dict keyed by (subject_id, timepoint). A (subject, timepoint) is
+processed iff all three modalities are present.
+
+Rerun files (`_run-02` in CALSNIC, `_run2` in CAPTURE) are used like any other
+scan — they are the repeat acquisition after a failed first scan, i.e. the good
+one. Only the **suffix itself is ignored**: it is stripped from the processed
+name, so `..._V1_run-02` and `..._V1` are the same sample. When both exist for
+one (subject, timepoint, modality) the highest run wins.
 
 The script auto-detects skull-stripped inputs: it tries `T1W_synthstrip` and
 falls back to `T1W` (same for T2/FLAIR). Override via CLI flags or env vars.
+Filenames may also carry a trailing `_synthstrip` regardless of folder.
 
 The processed folder/sample name keeps the full source structure
-`DATASET_SITE_SUBJECT_VISIT[_run-NN]` (e.g. `CALSNIC2_CAL_C003_V1`), derived
-from the raw filename minus its extension, optional `_synthstrip` suffix, and
-modality token. Subject grouping/labels are still extracted from this name by
-`src/splits.py`.
+`DATASET_SITE_SUBJECT_TIMEPOINT` (e.g. `CALSNIC2_CAL_C003_V1`,
+`CAPTURE_CHU_C178_00M`), derived from the raw filename minus its extension,
+optional `_synthstrip` suffix, and modality token. Subject grouping/labels are
+still extracted from this name by `src/als/splits.py`.
 
 Output layout (one folder per subject-visit, all three modalities inside):
     Data/processed/<sample_id>/<sample_id>_T1.nii.gz
@@ -46,6 +62,8 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from ..splits import extract_subject_id, label_from_subject_id
+
 try:
     import ants
 except ImportError:
@@ -55,29 +73,43 @@ except ImportError:
 _T1_RE = re.compile(r"_T1w?\d*_", flags=re.IGNORECASE)
 _T2_RE = re.compile(r"_T2w?\d*_", flags=re.IGNORECASE)
 _FL_RE = re.compile(r"_FLAIR(?:3D|_?EPI)?_?", flags=re.IGNORECASE)
-_SUBJECT_VISIT_RE = re.compile(r"(?:^|_)([CP]\d{3,})_(?:[A-Za-z0-9]+_)*?(V\d+)", flags=re.IGNORECASE)
-_RUN_RE = re.compile(r"_run-(\d+)", flags=re.IGNORECASE)
+# Timepoint token: CALSNIC visit index (V1) or CAPTURE months-since-baseline (00M).
+_TIMEPOINT = r"V\d+|\d+M"
+_SUBJECT_VISIT_RE = re.compile(
+    rf"(?:^|_)([CP]\d{{3,}})_(?:[A-Za-z0-9]+_)*?({_TIMEPOINT})(?=_|$)", flags=re.IGNORECASE
+)
+# Rerun suffix, both spellings: CALSNIC `_run-02`, CAPTURE `_run2`.
+_RUN_RE = re.compile(r"_run-?(\d+)", flags=re.IGNORECASE)
 # Modality token removed when building the processed folder/sample name, so the
-# name keeps the full DATASET_SITE_SUBJECT_VISIT[_run-NN] structure.
+# name keeps the full DATASET_SITE_SUBJECT_TIMEPOINT structure.
 _MODALITY_TOKEN_RE = re.compile(r"_(FLAIR(?:3D|_?EPI)?|T[12]w?\d*)(?=_|$)", flags=re.IGNORECASE)
 
 
 def folder_name_from_path(path: Path) -> str:
     """
     Processed folder / sample name from a raw filename: strip the `.nii.gz`
-    extension, an optional `_synthstrip` suffix, and the modality token, keeping
-    the full DATASET_SITE_SUBJECT_VISIT[_run-NN] structure.
+    extension, an optional `_synthstrip` suffix, the `_run-NN` / `_runN` rerun
+    tag, and the modality token, leaving the DATASET_SITE_SUBJECT_TIMEPOINT
+    structure.
+
+    The rerun tag is dropped on purpose: a rerun is the same scan of the same
+    subject at the same timepoint, so it must not become a separate sample.
 
     Examples
     --------
     >>> folder_name_from_path(Path("CALSNIC2_CAL_C003_T1w10_V1.nii.gz"))
     'CALSNIC2_CAL_C003_V1'
     >>> folder_name_from_path(Path("CALSNIC2_EDM_P110_T1w10_V1_run-02.nii.gz"))
-    'CALSNIC2_EDM_P110_V1_run-02'
+    'CALSNIC2_EDM_P110_V1'
+    >>> folder_name_from_path(Path("CAPTURE_CHU_P151_T1w10_00M_run2.nii.gz"))
+    'CAPTURE_CHU_P151_00M'
+    >>> folder_name_from_path(Path("CAPTURE_EDM_P151_T1w10_12M_synthstrip.nii.gz"))
+    'CAPTURE_EDM_P151_12M'
     """
     name = path.name
     if name.lower().endswith(".nii.gz"):
         name = name[: -len(".nii.gz")]
+    name = _RUN_RE.sub("", name)
     if name.lower().endswith("_synthstrip"):
         name = name[: -len("_synthstrip")]
     return _MODALITY_TOKEN_RE.sub("", name)
@@ -90,30 +122,32 @@ def folder_name_from_path(path: Path) -> str:
 class ScanFile:
     path: Path
     subject_id: str
-    visit: str
-    run: int
+    visit: str          # timepoint token: CALSNIC "V1" or CAPTURE "00M"
+    run: int            # 0 = original acquisition, >0 = a rerun; higher supersedes
 
     @property
     def sample_id(self) -> str:
-        # Full DATASET_SITE_SUBJECT_VISIT[_run-NN] name (lab convention), derived
-        # from the actual filename. Pairing still keys on (subject_id, visit).
+        # Full DATASET_SITE_SUBJECT_TIMEPOINT name (lab convention), derived from
+        # the actual filename. Pairing still keys on (subject_id, visit).
         return folder_name_from_path(self.path)
 
 
 def _parse_scan(path: Path, modality_re: re.Pattern) -> Optional[ScanFile]:
-    """Return ScanFile if the filename matches `modality_re` and yields a subject+visit, else None."""
+    """Return ScanFile if the filename matches `modality_re` and yields a subject+timepoint, else None."""
     name = path.name
     if not name.endswith(".nii.gz"):
         return None
     stripped = name[: -len(".nii.gz")]
     if not modality_re.search(stripped + "_"):
         return None
-    # Remove the modality token so the subject+visit regex matches without it.
+    # Remove the modality token so the subject+timepoint regex matches without it.
     cleaned = modality_re.sub("_", stripped + "_").strip("_")
     sv = _SUBJECT_VISIT_RE.search(cleaned)
     if not sv:
         return None
-    subject_id = sv.group(1).upper()
+    # Dataset-qualified (CALSNIC_C003 vs CAPTURE_C003) so the two cohorts never
+    # share a pairing key — same definition of "subject" the splitter uses.
+    subject_id = extract_subject_id(cleaned)
     visit = sv.group(2).upper()
     run_match = _RUN_RE.search(name)
     run = int(run_match.group(1)) if run_match else 0
@@ -122,11 +156,21 @@ def _parse_scan(path: Path, modality_re: re.Pattern) -> Optional[ScanFile]:
 
 def _scan_dir(directory: Path, modality_re: re.Pattern) -> dict[tuple[str, str], ScanFile]:
     """
-    Scan a modality directory and return {(subject_id, visit) -> ScanFile}.
-    When several runs exist for the same (subject, visit), the highest run wins.
+    Scan a modality directory and return {(subject_id, timepoint) -> ScanFile}.
+
+    Rerun files are used, only their `_run-NN` / `_runN` tag is ignored (it never
+    reaches the sample name). Several files can therefore land on one key: the
+    highest run wins, since a rerun is the repeat after a failed scan. Between
+    two files of equal run, the canonical (shortest) name wins.
     """
+    def rank(scan: ScanFile) -> tuple[int, int]:
+        """"Which file represents this timepoint" — bigger wins: later rerun, then
+        shorter (canonical) name. A full tie keeps the first in sorted order."""
+        return (scan.run, -len(scan.path.name))
+
     best: dict[tuple[str, str], ScanFile] = {}
     skipped: list[Path] = []
+    superseded: list[Path] = []
     for child in sorted(directory.iterdir()):
         if not child.is_file():
             continue
@@ -136,10 +180,22 @@ def _scan_dir(directory: Path, modality_re: re.Pattern) -> dict[tuple[str, str],
             continue
         key = (scan.subject_id, scan.visit)
         prev = best.get(key)
-        if prev is None or scan.run > prev.run:
+        if prev is None:
             best[key] = scan
+            continue
+        # Same subject + timepoint: a rerun of it, or a stray extra name segment
+        # (`..._P110_1_T2w10_V2` next to `..._P110_T2w10_V2`). Keep one, and say
+        # which, so the choice is visible and deterministic rather than silent.
+        if rank(scan) > rank(prev):
+            best[key] = scan
+            superseded.append(prev.path)
+        else:
+            superseded.append(scan.path)
+    # Useful diagnostics without making the script error out.
+    if superseded:
+        print(f"  [scan] {directory.name}: {len(superseded)} file(s) superseded by a rerun or a "
+              f"canonical name; e.g. {superseded[0].name}")
     if skipped:
-        # Useful diagnostic without making the script error out.
         print(f"  [scan] {directory.name}: skipped {len(skipped)} unmatched file(s); e.g. {skipped[0].name}")
     return best
 
@@ -149,7 +205,7 @@ def find_triplets(
     t2_dir: Path,
     flair_dir: Path,
 ) -> list[tuple[ScanFile, ScanFile, ScanFile]]:
-    """Return matched (T1, T2, FLAIR) ScanFiles for every (subject, visit) with all three present."""
+    """Return matched (T1, T2, FLAIR) ScanFiles for every (subject, timepoint) with all three present."""
     t1 = _scan_dir(t1_dir, _T1_RE)
     t2 = _scan_dir(t2_dir, _T2_RE)
     fl = _scan_dir(flair_dir, _FL_RE)
@@ -278,13 +334,11 @@ def write_manifest(processed_dir: Path, manifest_path: Path) -> int:
         if not (t1.exists() and t2.exists() and fl.exists()):
             continue
         sv = _SUBJECT_VISIT_RE.search(name)
-        subject_id = sv.group(1).upper() if sv else name.split("_")[0].upper()
+        subject_id = extract_subject_id(name)
         visit = sv.group(2).upper() if sv else ""
-        if subject_id.startswith("C"):
-            label = "0"
-        elif subject_id.startswith("P"):
-            label = "1"
-        else:
+        try:
+            label = str(int(label_from_subject_id(subject_id)))
+        except ValueError:
             continue
         rows.append({
             "sample_id": name,
@@ -374,7 +428,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     skipped = 0
     errors = 0
     for i, (t1, t2, fl) in enumerate(triplets, start=1):
-        sample_id = t1.sample_id  # e.g. "C005_V1"
+        sample_id = t1.sample_id  # e.g. "CALSNIC2_EDM_C005_V1" / "CAPTURE_CHU_C178_00M"
         out_dir = processed_dir / sample_id
         outputs = [
             out_dir / f"{sample_id}_T1.nii.gz",

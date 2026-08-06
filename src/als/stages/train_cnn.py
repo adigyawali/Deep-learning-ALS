@@ -8,6 +8,7 @@ from torch.utils.data import Subset
 
 from .. import sanity
 from ..config import get
+from ..data.mixup import build_mixup
 from ..data.volume_dataset import VolumeDataset
 from ..models.cnn_encoder import ALSTriStreamClassifier
 from ..paths import DEFAULT_DATA_DIR, RunPaths
@@ -36,6 +37,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
     aug_level = get(cfg, "data", "aug_level", default="medium")
     aug_config = cfg.get("augmentations")   # from root config.yaml (source of truth)
+    mixup = build_mixup(aug_config)         # batch-level, so applied by the trainer
     c = cfg["cnn"]
 
     full = VolumeDataset(data_dir, return_mode="tuple", target_shape=target_shape, transform=False)
@@ -88,6 +90,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             device=device, epochs=c["epochs"], ckpt_dir=fpaths.checkpoints, ckpt_prefix="cnn",
             config=cfg,
             amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
+            mixup=mixup,
             grad_accum_steps=c.get("grad_accum_steps", 1),
             clip_grad=get(cfg, "train", "clip_grad", default=1.0),
             best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),

@@ -20,7 +20,7 @@ def _loaders(n=12, d=8, seed=0):
     return DataLoader(ds, batch_size=4), DataLoader(ds, batch_size=4)
 
 
-def _forward(model, batch, device):
+def _forward(model, batch, device, mixup=None):
     x, y = batch
     return model(x.to(device)), y.to(device).unsqueeze(1)
 

@@ -9,6 +9,7 @@ from torch.utils.data import Subset
 from .. import sanity
 from ..config import get
 from ..data.feature_dataset import ALSSpatialFeatureDataset, compute_pos_weight, indices_from
+from ..data.mixup import build_mixup
 from ..models.cnn_vit import SpatialMultiModalViT
 from ..paths import RunPaths
 from ..splits import n_folds_in, read_splits, resolve_splits
@@ -20,6 +21,10 @@ from ._common import make_loader, smoke_trim, vit_forward
 def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     v = cfg["vit"]
     dl = cfg.get("dataloader", {})
+    # The ViT trains on cached feature maps dumped from *un-augmented* volumes, so
+    # MixUp is the one augmentation this stage can have. Mixing CNN features is
+    # manifold mixup — same linear interpolation, one layer deeper.
+    mixup = build_mixup(cfg.get("augmentations"))
 
     # Splits are shared across folds and were written by extract_features; read
     # them once to learn the fold count (honours explicit folds from config.yaml).
@@ -79,6 +84,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             device=device, epochs=v["epochs"], ckpt_dir=fpaths.checkpoints, ckpt_prefix="vit",
             config=cfg,
             amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
+            mixup=mixup,
             clip_grad=get(cfg, "train", "clip_grad", default=1.0),
             best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),
             early_stop_patience=get(cfg, "train", "early_stop_patience", default=15),

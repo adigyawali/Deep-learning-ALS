@@ -7,6 +7,7 @@ from torch.utils.data import Subset
 
 from .. import sanity
 from ..config import get
+from ..data.mixup import build_mixup
 from ..data.volume_dataset import VolumeDataset
 from ..models.cnn_nnmamba import CNNnnMamba
 from ..models.components.mamba_block import MAMBA_BACKEND
@@ -25,6 +26,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     use_frequency = bool(get(cfg, "data", "use_frequency", default=True))
     aug_level = get(cfg, "data", "aug_level", default="medium")
     aug_config = cfg.get("augmentations")   # from root config.yaml (source of truth)
+    mixup = build_mixup(aug_config)         # batch-level, so applied by the trainer
     m = cfg["nnmamba"]
     spatial_encoder = m.get("spatial_encoder", "scratch")
     print(f"[nnmamba] Mamba backend: {MAMBA_BACKEND}  use_frequency={use_frequency}  "
@@ -33,13 +35,12 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
              f"freeze={m.get('freeze_backbone', True)})" if spatial_encoder == "pretrained" else ""))
 
     full = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
-                         transform=False, use_frequency=use_frequency)
+                         transform=False)
     if len(full) < 3:
         print(f"[nnmamba] Error: fewer than 3 samples in {data_dir}.")
         return
     train_aug = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
-                              transform=True, use_frequency=use_frequency,
-                              aug_level=aug_level, aug_config=aug_config)
+                              transform=True, aug_level=aug_level, aug_config=aug_config)
 
     splits = resolve_splits(
         full.to_sample_meta(), paths.splits_path,
@@ -93,6 +94,7 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
             device=device, epochs=m["epochs"], ckpt_dir=fpaths.checkpoints, ckpt_prefix="nnmamba",
             config=cfg,
             amp_dtype=amp_dtype_from_str(get(cfg, "train", "amp", default="bf16"), device),
+            mixup=mixup,
             grad_accum_steps=m.get("grad_accum_steps", 1),
             clip_grad=get(cfg, "train", "clip_grad", default=1.0),
             best_metric_name=get(cfg, "train", "best_metric", default="roc_auc"),

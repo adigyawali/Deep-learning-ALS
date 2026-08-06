@@ -7,6 +7,8 @@ That single hook lets the tri-stream CNN (3 volume tensors), the ViT (one
 stacked feature tensor), and end-to-end nnMamba (one volume tensor) all reuse:
 
   * AMP (bf16 default on CUDA; fp16 path uses a GradScaler),
+  * optional MixUp (``config.yaml`` → ``augmentations.mixup``), applied by the
+    adapter to *training* batches only, never to validation,
   * gradient accumulation (raise it to keep the effective batch size while the
     per-step memory drops — the main OOM lever besides batch size),
   * a CUDA-OOM guard that prints concrete remedies instead of a bare traceback,
@@ -30,7 +32,7 @@ from .. import gpu
 from . import metrics as M
 from .checkpointing import save_best_weights
 
-ForwardFn = Callable[[torch.nn.Module, object, torch.device], tuple[torch.Tensor, torch.Tensor]]
+ForwardFn = Callable[..., tuple[torch.Tensor, torch.Tensor]]
 
 _OOM_HELP = (
     "CUDA out of memory.\n"
@@ -62,6 +64,7 @@ def fit(
     ckpt_prefix: str,
     config: Optional[dict] = None,
     amp_dtype: Optional[torch.dtype] = None,
+    mixup=None,
     grad_accum_steps: int = 1,
     clip_grad: float = 1.0,
     best_metric_name: str = "roc_auc",
@@ -79,7 +82,12 @@ def fit(
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[trainer] params total={n_params:,} trainable={n_train:,} "
           f"amp={'off' if not use_amp else amp_dtype} grad_accum={grad_accum_steps} "
-          f"select={best_metric_name}")
+          f"select={best_metric_name}"
+          + (f" mixup=alpha{mixup.alpha:g}/p{mixup.prob:g}" if mixup is not None else ""))
+    if mixup is not None:
+        # Mixed targets are soft, so a training ROC-AUC over them is undefined;
+        # it is reported as nan. Validation is never mixed and is unaffected.
+        print("[trainer] mixup on: train batches use soft targets, so tr_auc is nan (val is unmixed).")
     print(f"[trainer] {gpu.device_report(device)}")
 
     history: list[dict] = []
@@ -102,7 +110,7 @@ def fit(
         for step, batch in enumerate(pbar):
             try:
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                    logits, labels = forward_fn(model, batch, device)
+                    logits, labels = forward_fn(model, batch, device, mixup)
                     loss = criterion(logits, labels)
                 loss_to_back = loss / grad_accum_steps
                 scaler.scale(loss_to_back).backward()
@@ -123,10 +131,13 @@ def fit(
             running_loss += float(loss.detach()) * bs
             seen += bs
             pbar.set_postfix(loss=f"{running_loss / max(1, seen):.4f}")
-            with torch.no_grad():
-                p = torch.sigmoid(logits.detach().float()).reshape(-1).cpu().tolist()
-            tr_probs.extend(p)
-            tr_labels.extend(labels.detach().reshape(-1).cpu().tolist())
+            if mixup is None:
+                # Under mixup the targets are soft, so these would not be a
+                # valid ROC input — skip and report train_auc as nan.
+                with torch.no_grad():
+                    p = torch.sigmoid(logits.detach().float()).reshape(-1).cpu().tolist()
+                tr_probs.extend(p)
+                tr_labels.extend(labels.detach().reshape(-1).cpu().tolist())
 
         # Flush a trailing partial accumulation window.
         if len(train_loader) % grad_accum_steps != 0:
@@ -138,7 +149,7 @@ def fit(
             optimizer.zero_grad(set_to_none=True)
 
         train_loss = running_loss / max(1, seen)
-        train_auc = M.safe_auc(tr_labels, tr_probs)
+        train_auc = M.safe_auc(tr_labels, tr_probs) if tr_labels else float("nan")
 
         # ── validate ──────────────────────────────────────────────────────
         model.eval()

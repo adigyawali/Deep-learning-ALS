@@ -13,7 +13,7 @@ Split semantics:
     Fold ``k`` supplies the validation set; the other ``n_folds-1`` folds are
     that fold's training set. So each fold is a train/val split and there are
     ``n_folds`` of them, all sharing the one fixed test set.
-  - Multi-visit subjects (V1/V2/V3, run-02 reruns) are grouped by subject_id so
+  - Multi-timepoint subjects (V1/V2/V3, or 00M/04M/12M) are grouped by subject_id so
     every visit of a subject lands in the same partition (no patient leakage).
   - Stratification is by label (control / patient), and by site when at least
     two sites are present and each site has enough subjects per class. Within
@@ -23,9 +23,20 @@ Split semantics:
     count, and per-fold / test subject lists, so the file itself is the contract.
 
 Folder/file naming assumptions:
-  - Subject IDs look like ``C005``, ``P110`` (one letter + digits).
-  - Folder names look like ``C005_V1``, ``P110_V2_run-02``, or the longer raw
-    form ``CALSNIC2_EDM_C005_V1``. ``extract_subject_id`` handles both.
+  - Subject tokens look like ``C005``, ``P110`` (one letter + digits).
+  - Folder names look like ``C005_V1``, or the longer raw form
+    ``DATASET_SITE_SUBJECT_VISIT`` — ``CALSNIC2_EDM_C005_V1`` (CALSNIC, visit
+    ``V#``) and ``CAPTURE_CHU_C178_00M`` (CAPTURE, visit = months since
+    baseline). ``extract_subject_id`` handles all of them.
+
+Subject IDs are **dataset-qualified**: CALSNIC and CAPTURE both number their
+participants ``C###``/``P###``, and the numbering is *not* shared — CALSNIC's
+``C003`` and CAPTURE's ``C003`` are different people. Keying on the bare token
+would silently merge them into one "subject". ``extract_subject_id`` therefore
+returns ``CALSNIC_C003`` / ``CAPTURE_C003`` whenever the name carries a dataset
+prefix, and the bare ``C003`` only when it does not (short folder names). The
+trailing study number is dropped (``CALSNIC2`` → ``CALSNIC``) so the waves of
+one cohort stay a single namespace.
 """
 
 from __future__ import annotations
@@ -39,7 +50,13 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
 _SUBJECT_ID_RE = re.compile(r"(?:^|_)([CP]\d{3,})(?:_|$)", flags=re.IGNORECASE)
-_SITE_RE = re.compile(r"CALSNIC\d*_([A-Z]{2,4})_", flags=re.IGNORECASE)
+# The lab's raw convention, shared by CALSNIC and CAPTURE:
+#   DATASET[study#]_SITE_SUBJECT_...   e.g. CALSNIC2_EDM_C005_V1, CAPTURE_CHU_C178_00M
+# The lazy `[A-Za-z]+?` + `\d*` splits "CALSNIC2" into dataset "CALSNIC" + study "2",
+# so CALSNIC1/CALSNIC2 share one subject namespace while CAPTURE gets its own.
+_DATASET_SITE_SUBJECT_RE = re.compile(
+    r"^([A-Za-z]+?)\d*_([A-Za-z]{2,4})_([CP]\d{3,})(?:_|$)", flags=re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -53,21 +70,36 @@ class SampleMeta:
 
 # ─── ID + site extraction ──────────────────────────────────────────────────
 
+def extract_dataset(name: str) -> Optional[str]:
+    """Return the cohort name (e.g. CALSNIC, CAPTURE) if the name carries one."""
+    match = _DATASET_SITE_SUBJECT_RE.match(name)
+    return match.group(1).upper() if match else None
+
+
 def extract_subject_id(name: str, fallback: Optional[str] = None) -> str:
     """
-    Return the C### / P### subject token from a folder or file name.
+    Return the dataset-qualified subject ID from a folder or file name.
+
+    CALSNIC and CAPTURE reuse the same ``C###``/``P###`` numbering for different
+    people, so the dataset is part of the identity whenever the name carries it.
+    Names without a dataset prefix keep the bare token (unchanged behaviour).
 
     Examples
     --------
     >>> extract_subject_id("C005_V1")
     'C005'
-    >>> extract_subject_id("CALSNIC2_EDM_P110_V2_run-02")
-    'P110'
+    >>> extract_subject_id("CALSNIC2_EDM_P110_V2")
+    'CALSNIC_P110'
+    >>> extract_subject_id("CAPTURE_CHU_C178_00M")
+    'CAPTURE_C178'
     >>> extract_subject_id("anything_else", fallback="X1")
     'X1'
     """
     if fallback:
         return fallback.upper()
+    match = _DATASET_SITE_SUBJECT_RE.match(name)
+    if match:
+        return f"{match.group(1).upper()}_{match.group(3).upper()}"
     match = _SUBJECT_ID_RE.search(name)
     if match:
         return match.group(1).upper()
@@ -75,18 +107,28 @@ def extract_subject_id(name: str, fallback: Optional[str] = None) -> str:
     return name.split("_")[0].upper()
 
 
+def subject_token(subject_id: str) -> str:
+    """Strip the dataset qualifier back off: ``CAPTURE_P151`` → ``P151``."""
+    match = _SUBJECT_ID_RE.search(subject_id)
+    return match.group(1).upper() if match else subject_id.upper()
+
+
 def extract_site(name: str) -> Optional[str]:
-    """Return the CALSNIC site code (e.g. EDM) if present, else None."""
-    match = _SITE_RE.search(name)
-    return match.group(1).upper() if match else None
+    """Return the acquisition-site code (e.g. EDM, CHU) if present, else None."""
+    match = _DATASET_SITE_SUBJECT_RE.match(name)
+    return match.group(2).upper() if match else None
 
 
 def label_from_subject_id(subject_id: str) -> float:
-    """C### → 0.0 (control), P### → 1.0 (patient). Raises on anything else."""
-    sid = subject_id.upper()
-    if sid.startswith("C"):
+    """C### → 0.0 (control), P### → 1.0 (patient). Raises on anything else.
+
+    Reads the C/P *token*, not the first character — a dataset-qualified ID like
+    ``CAPTURE_P151`` starts with a "C" but is a patient.
+    """
+    token = subject_token(subject_id)
+    if token.startswith("C"):
         return 0.0
-    if sid.startswith("P"):
+    if token.startswith("P"):
         return 1.0
     raise ValueError(f"Cannot infer label from subject_id={subject_id!r}")
 
@@ -280,12 +322,27 @@ def make_splits_from_explicit(
       * subjects present in the data but listed nowhere are DROPPED with a loud
         warning (so a partial split is visible, never silent).
     IDs are matched case-insensitively (upper-cased), like ``extract_subject_id``.
+    They may be written either dataset-qualified (``CAPTURE_C003``) or as a bare
+    token (``C003``); a bare token matches that participant in **every** cohort
+    present, so pre-CAPTURE config files keep working unchanged. Qualify the ID
+    when the two cohorts must go to different partitions.
     """
     subject_to_label, _subject_to_site, subject_to_samples = _index_subjects(samples)
     known = set(subject_to_label)
+    by_token: dict[str, list[str]] = defaultdict(list)
+    for sid in known:
+        by_token[subject_token(sid)].append(sid)
 
     def _norm(ids: Sequence[str]) -> list[str]:
         return [str(x).strip().upper() for x in (ids or [])]
+
+    def _resolve(configured: str) -> list[str]:
+        """Configured ID → the known subject IDs it names (empty if none)."""
+        if configured in known:
+            return [configured]
+        if configured == subject_token(configured):     # bare token → every cohort
+            return sorted(by_token.get(configured, []))
+        return []
 
     test = _norm(test_subjects)
     fold_lists = [_norm(f) for f in (folds or [])]
@@ -296,20 +353,32 @@ def make_splits_from_explicit(
 
     # Reject any subject assigned to more than one partition.
     assigned: dict[str, str] = {}
-    for sid in test:
-        assigned[sid] = "test_subjects"
-    for k, fl in enumerate(fold_lists):
-        for sid in fl:
+    configured_missing: list[str] = []
+    resolved_test: list[str] = []
+    resolved_folds: list[list[str]] = [[] for _ in fold_lists]
+
+    def _claim(configured: str, where: str, sink: list[str]) -> None:
+        matches = _resolve(configured)
+        if not matches:
+            configured_missing.append(configured)
+            return
+        for sid in matches:
             if sid in assigned:
                 raise ValueError(
-                    f"Subject {sid} is listed in both {assigned[sid]} and folds[{k}] in "
+                    f"Subject {sid} is listed in both {assigned[sid]} and {where} in "
                     f"config.yaml cross_validation — each subject may appear only once."
                 )
-            assigned[sid] = f"folds[{k}]"
+            assigned[sid] = where
+            sink.append(sid)
 
-    configured_missing = sorted(sid for sid in assigned if sid not in known)
+    for sid in test:
+        _claim(sid, "test_subjects", resolved_test)
+    for k, fl in enumerate(fold_lists):
+        for sid in fl:
+            _claim(sid, f"folds[{k}]", resolved_folds[k])
+
     if configured_missing:
-        head = configured_missing[:10]
+        head = sorted(configured_missing)[:10]
         print(f"[splits] WARNING: {len(configured_missing)} configured subject(s) are not in the "
               f"data and were ignored: {head}{' ...' if len(configured_missing) > 10 else ''}")
 
@@ -320,8 +389,8 @@ def make_splits_from_explicit(
               f"in config.yaml and will be DROPPED (never trained or evaluated): "
               f"{head}{' ...' if len(unassigned) > 10 else ''}")
 
-    test_known = [sid for sid in test if sid in known]
-    fold_known = [[sid for sid in fl if sid in known] for fl in fold_lists]
+    test_known = resolved_test
+    fold_known = resolved_folds
     n_total = len(known)
     return _assemble_splits(
         subject_to_label=subject_to_label,
