@@ -109,7 +109,17 @@ def main(argv: list[str] | None = None) -> int:
         print("=== subjects (what the splitter actually sees) ===")
         print(f"  samples          : {len(triplets)}")
         print(f"  unique subjects  : {len(by_subject)}")
-        print(f"  labels           : {dict(labels)}")
+        print(f"  labels (subject) : {dict(labels)}")
+        # Sample-level balance can be much more skewed than subject-level when one
+        # class is followed longitudinally and the other is scanned once. This is
+        # what the loss and pos_weight actually see.
+        sample_labels: Counter[str] = Counter()
+        for t1, _, _ in triplets:
+            try:
+                sample_labels["patient" if label_from_subject_id(t1.subject_id) else "control"] += 1
+            except ValueError:
+                sample_labels["UNKNOWN"] += 1
+        print(f"  labels (sample)  : {dict(sample_labels)}")
         print(f"  cohorts          : {dict(cohort_subjects)}")
         print(f"  sites (samples)  : {dict(sites)}")
         print("  timepoints/subject: "
@@ -118,6 +128,34 @@ def main(argv: list[str] | None = None) -> int:
         if n_sub:
             print(f"  -> a 20% test set is ~{round(n_sub * 0.2)} subjects; "
                   f"each of 5 folds validates on ~{round(n_sub * 0.8 / 5)}")
+
+        # Will `stratify_by_site: true` actually engage? Mirror the rule in
+        # splits.make_subject_splits: every (label, site) bucket needs at least
+        # n_folds+1 subjects, and there must be more than 2 buckets. Otherwise the
+        # splitter quietly falls back to label-only stratification, which with
+        # several scanners can leave folds site-imbalanced.
+        n_folds = 5
+        subject_site: dict[str, str] = {}
+        subject_label: dict[str, str] = {}
+        for t1, _, _ in triplets:
+            subject_site.setdefault(t1.subject_id, extract_site(t1.sample_id) or "UNK")
+            try:
+                subject_label.setdefault(
+                    t1.subject_id, "patient" if label_from_subject_id(t1.subject_id) else "control")
+            except ValueError:
+                subject_label.setdefault(t1.subject_id, "UNKNOWN")
+        buckets: Counter[tuple[str, str]] = Counter(
+            (subject_label[s], subject_site[s]) for s in by_subject)
+        print()
+        print("=== site stratification (subjects per label x site) ===")
+        for (lab, site), n in sorted(buckets.items()):
+            flag = "" if n >= n_folds + 1 else f"   <-- under {n_folds + 1}"
+            print(f"  {site:<6} {lab:<8} {n:>4}{flag}")
+        engages = len(buckets) > 2 and all(n >= n_folds + 1 for n in buckets.values())
+        print(f"  -> with n_folds={n_folds}, stratify_by_site would "
+              f"{'ENGAGE' if engages else 'FALL BACK to label-only'}")
+        if not engages:
+            print("     (folds may end up site-imbalanced; see notes in config.yaml)")
 
     if total_unmatched:
         print(f"\nNOTE: {total_unmatched} file(s) the parser could not read. Ignore entries like "
