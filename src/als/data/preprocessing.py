@@ -30,9 +30,12 @@ one. Only the **suffix itself is ignored**: it is stripped from the processed
 name, so `..._V1_run-02` and `..._V1` are the same sample. When both exist for
 one (subject, timepoint, modality) the highest run wins.
 
-The script auto-detects skull-stripped inputs: it tries `T1W_synthstrip` and
-falls back to `T1W` (same for T2/FLAIR). Override via CLI flags or env vars.
-Filenames may also carry a trailing `_synthstrip` regardless of folder.
+The script auto-detects the modality subdirectories, skull-stripped first:
+`T1W_synthstrip → T1W`, `T2W_synthstrip → T2PD_synthstrip → T2W → T2PD`,
+`FLAIR_synthstrip → FLAIR`. The `T2PD*` names cover the dual-echo T2/PD series
+some cohorts are exported as. Override any of them with `--t1-subdir` /
+`--t2-subdir` / `--flair-subdir`. Filenames may also carry a trailing
+`_synthstrip` regardless of which folder they sit in.
 
 The processed folder/sample name keeps the full source structure
 `DATASET_SITE_SUBJECT_TIMEPOINT` (e.g. `CALSNIC2_CAL_C003_V1`,
@@ -71,7 +74,10 @@ except ImportError:
 
 
 _T1_RE = re.compile(r"_T1w?\d*_", flags=re.IGNORECASE)
-_T2_RE = re.compile(r"_T2w?\d*_", flags=re.IGNORECASE)
+# T2 token, both cohorts: CALSNIC writes `T2w10`, CAPTURE writes `PDT2` (the
+# dual-echo PD/T2 series). `T2PD` is accepted too — the folder is named that way
+# in some exports. A pure-PD file (`PDw10`) deliberately does NOT match.
+_T2_RE = re.compile(r"_(?:PD)?T2(?:PD)?w?\d*_", flags=re.IGNORECASE)
 _FL_RE = re.compile(r"_FLAIR(?:3D|_?EPI)?_?", flags=re.IGNORECASE)
 # Timepoint token: CALSNIC visit index (V1) or CAPTURE months-since-baseline (00M).
 _TIMEPOINT = r"V\d+|\d+M"
@@ -82,7 +88,9 @@ _SUBJECT_VISIT_RE = re.compile(
 _RUN_RE = re.compile(r"_run-?(\d+)", flags=re.IGNORECASE)
 # Modality token removed when building the processed folder/sample name, so the
 # name keeps the full DATASET_SITE_SUBJECT_TIMEPOINT structure.
-_MODALITY_TOKEN_RE = re.compile(r"_(FLAIR(?:3D|_?EPI)?|T[12]w?\d*)(?=_|$)", flags=re.IGNORECASE)
+_MODALITY_TOKEN_RE = re.compile(
+    r"_(FLAIR(?:3D|_?EPI)?|(?:PD)?T[12](?:PD)?w?\d*)(?=_|$)", flags=re.IGNORECASE
+)
 
 
 def folder_name_from_path(path: Path) -> str:
@@ -360,12 +368,26 @@ def write_manifest(processed_dir: Path, manifest_path: Path) -> int:
 # ─── Entry point ──────────────────────────────────────────────────────────
 
 
-def _pick_dir(raw_root: Path, preferred: str, fallback: str) -> Path:
-    """Return raw_root/preferred if it exists (and has .nii.gz files), else fallback."""
-    p = raw_root / preferred
-    if p.exists() and any(p.glob("*.nii.gz")):
-        return p
-    return raw_root / fallback
+# Modality subdirectory names to try, in order. Skull-stripped folders come first
+# so they win when both are present. `T2PD*` covers the dual-echo T2/PD series the
+# lab exports for some cohorts — the T2 images live in that folder.
+_T1_SUBDIRS = ("T1W_synthstrip", "T1W")
+_T2_SUBDIRS = ("T2W_synthstrip", "T2PD_synthstrip", "T2W", "T2PD")
+_FLAIR_SUBDIRS = ("FLAIR_synthstrip", "FLAIR")
+
+
+def _pick_dir(raw_root: Path, candidates: Iterable[str]) -> Path:
+    """First candidate under ``raw_root`` that exists and holds .nii.gz files.
+
+    Falls back to the first candidate so the caller's "folder not found" error
+    names something recognisable when none of them are present.
+    """
+    names = list(candidates)
+    for name in names:
+        p = raw_root / name
+        if p.is_dir() and any(p.glob("*.nii.gz")):
+            return p
+    return raw_root / names[0]
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -377,9 +399,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ALS multimodal MRI preprocessing.")
     p.add_argument("--raw-dir", type=Path, default=default_raw, help="Raw NIfTI root (default: Data/raw).")
     p.add_argument("--processed-dir", type=Path, default=default_processed, help="Processed output root.")
-    p.add_argument("--t1-subdir", type=str, default=None, help="Subdir under raw-dir for T1. Auto: T1W_synthstrip → T1W.")
-    p.add_argument("--t2-subdir", type=str, default=None, help="Subdir under raw-dir for T2. Auto: T2W_synthstrip → T2W.")
-    p.add_argument("--flair-subdir", type=str, default=None, help="Subdir under raw-dir for FLAIR. Auto: FLAIR_synthstrip → FLAIR.")
+    p.add_argument("--t1-subdir", type=str, default=None, help=f"Subdir under raw-dir for T1. Auto: {' → '.join(_T1_SUBDIRS)}.")
+    p.add_argument("--t2-subdir", type=str, default=None, help=f"Subdir under raw-dir for T2. Auto: {' → '.join(_T2_SUBDIRS)}.")
+    p.add_argument("--flair-subdir", type=str, default=None, help=f"Subdir under raw-dir for FLAIR. Auto: {' → '.join(_FLAIR_SUBDIRS)}.")
     p.add_argument("--nonlinear", action="store_true", help="Use SyN T1→MNI registration instead of Affine.")
     p.add_argument("--limit", type=int, default=0, help="If >0, only process the first N triplets (debug).")
     p.add_argument("--list-only", action="store_true", help="Print matched triplets and exit, no ANTs work.")
@@ -392,9 +414,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     processed_dir: Path = args.processed_dir
     qc_dir = processed_dir / "_QC_Snapshots"
 
-    t1_dir = raw_dir / args.t1_subdir if args.t1_subdir else _pick_dir(raw_dir, "T1W_synthstrip", "T1W")
-    t2_dir = raw_dir / args.t2_subdir if args.t2_subdir else _pick_dir(raw_dir, "T2W_synthstrip", "T2W")
-    flair_dir = raw_dir / args.flair_subdir if args.flair_subdir else _pick_dir(raw_dir, "FLAIR_synthstrip", "FLAIR")
+    t1_dir = raw_dir / args.t1_subdir if args.t1_subdir else _pick_dir(raw_dir, _T1_SUBDIRS)
+    t2_dir = raw_dir / args.t2_subdir if args.t2_subdir else _pick_dir(raw_dir, _T2_SUBDIRS)
+    flair_dir = raw_dir / args.flair_subdir if args.flair_subdir else _pick_dir(raw_dir, _FLAIR_SUBDIRS)
 
     print(f"Raw dir       : {raw_dir}")
     print(f"  T1 from     : {t1_dir.name}")

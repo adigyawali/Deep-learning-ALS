@@ -39,6 +39,32 @@ def test_parse_modalities(tmp_path: Path):
         assert (s.subject_id, s.visit, s.run) == (subj, visit, run), fn
 
 
+def test_capture_pdt2_is_the_t2_modality(tmp_path: Path):
+    """CAPTURE exports T2 as the dual-echo `PDT2` series; a pure-PD file is not T2."""
+    for fn in ("CAPTURE_CHU_C178_PDT2_00M_synthstrip.nii.gz",
+               "CALSNIC2_EDM_C005_T2PD10_V1.nii.gz"):
+        assert _parse_scan(tmp_path / fn, _T2_RE) is not None, fn
+    for fn in ("CAPTURE_CHU_C178_PD_00M_synthstrip.nii.gz",
+               "CALSNIC2_EDM_C005_PDw10_V1.nii.gz"):
+        assert _parse_scan(tmp_path / fn, _T2_RE) is None, fn
+    # A PDT2 file must not be mistaken for T1 or FLAIR.
+    pdt2 = tmp_path / "CAPTURE_CHU_C178_PDT2_00M_synthstrip.nii.gz"
+    assert _parse_scan(pdt2, _T1_RE) is None and _parse_scan(pdt2, _FL_RE) is None
+
+
+def test_lab_synthstrip_layout_pairs(tmp_path: Path):
+    """The real lab layout: *_synthstrip folders, PDT2 for T2, _synthstrip filenames."""
+    t1d = tmp_path / "T1W_synthstrip"
+    t2d = tmp_path / "T2PD_synthstrip"
+    fld = tmp_path / "FLAIR_synthstrip"
+    _touch(t1d / "CAPTURE_CHU_P151_T1w10_12M_synthstrip.nii.gz")
+    _touch(t2d / "CAPTURE_CHU_P151_PDT2_12M_synthstrip.nii.gz")
+    _touch(fld / "CAPTURE_CHU_P151_FLAIR3D_12M_synthstrip.nii.gz")
+    triplets = find_triplets(t1d, t2d, fld)
+    assert len(triplets) == 1
+    assert {s.sample_id for s in triplets[0]} == {"CAPTURE_CHU_P151_12M"}
+
+
 def test_same_subject_number_in_two_cohorts_stays_distinct(tmp_path: Path):
     calsnic = _parse_scan(tmp_path / "CALSNIC2_EDM_C003_T1w10_V1.nii.gz", _T1_RE)
     capture = _parse_scan(tmp_path / "CAPTURE_EDM_C003_T1w10_00M.nii.gz", _T1_RE)
