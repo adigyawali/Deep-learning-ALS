@@ -450,6 +450,60 @@ def indices_from_split(
     return [i for i, s in enumerate(samples) if s.subject_id in subjects]
 
 
+def new_seed() -> int:
+    """A fresh seed from system entropy, for deliberately reshuffling the split.
+
+    Regenerating with the *same* seed reproduces the *same* folds — that is the
+    whole point of the file. So "reshuffle" means "pick a new seed", and the seed
+    is recorded in ``splits.json`` so the new split is reproducible in turn.
+    """
+    return random.SystemRandom().randrange(1, 2**31 - 1)
+
+
+def coverage(samples: Sequence[SampleMeta], splits: dict) -> dict[str, list[str]]:
+    """Compare a splits file against the data actually present.
+
+    Returns ``{"missing": [...], "unassigned": [...]}`` — subjects the file lists
+    but the dataset does not have, and subjects present in the dataset that the
+    file never mentions. Both empty means the split matches the data exactly.
+    """
+    known = {s.subject_id for s in samples}
+    listed: set[str] = set(splits.get("test_subjects", []))
+    for fold in splits.get("folds", []):
+        listed |= set(fold.get("val_subjects", []))
+    return {"missing": sorted(listed - known), "unassigned": sorted(known - listed)}
+
+
+def warn_if_stale(samples: Sequence[SampleMeta], splits: dict, splits_path: Path | str) -> bool:
+    """Print a loud warning when a cached split no longer matches the data.
+
+    A frozen split whose subject IDs do not appear in the dataset produces empty
+    folds and a confusing downstream crash rather than an obvious error, so this
+    says plainly what is wrong and how to fix it. Returns True if stale.
+    """
+    cov = coverage(samples, splits)
+    missing, unassigned = cov["missing"], cov["unassigned"]
+    if not missing and not unassigned:
+        return False
+
+    known = {s.subject_id for s in samples}
+    listed = len(missing) + sum(1 for s in known if s not in set(unassigned))
+
+    print(f"[splits] WARNING: {splits_path} does not match the processed data.")
+    if missing:
+        print(f"[splits]   {len(missing)} subject(s) listed in the split are NOT in the data, "
+              f"e.g. {missing[:5]}")
+    if unassigned:
+        print(f"[splits]   {len(unassigned)} subject(s) in the data are NOT in the split "
+              f"(they will be unused), e.g. {unassigned[:5]}")
+    if missing and len(missing) == listed:
+        print("[splits]   NOT ONE listed subject matches the data — every fold will be EMPTY. "
+              "This split was almost certainly written under an older naming scheme.")
+    print("[splits]   Fix: re-freeze it with "
+          "`python experiment.py --model <model> splits --reshuffle`.")
+    return True
+
+
 def load_or_build_splits(
     samples: Sequence[SampleMeta],
     splits_path: Path | str,
@@ -461,19 +515,24 @@ def load_or_build_splits(
 ) -> dict:
     """Read `splits_path` if present, else compute the CV split and write it.
 
-    The first stage that runs creates the shared file; every other stage, every
-    fold, and both models reuse it. This is the single guarantee that
-    ``cnn_vit`` and ``cnn_nnmamba`` are trained and evaluated on the same folds
-    and the same held-out test subjects.
+    The file is the contract: once written it is reused by every stage, every
+    fold, and both models, so ``cnn_vit`` and ``cnn_nnmamba`` are trained and
+    evaluated on identical folds — and so two independent runs are compared on
+    the same held-out test subjects. It changes only when you delete it or run
+    the ``splits --reshuffle`` command.
     """
     splits_path = Path(splits_path)
     if splits_path.exists():
-        return read_splits(splits_path)
+        splits = read_splits(splits_path)
+        warn_if_stale(samples, splits, splits_path)
+        return splits
     splits = make_subject_splits(
         samples, n_folds=n_folds, test_ratio=test_ratio,
         seed=seed, stratify_by_site=stratify_by_site,
     )
     write_splits(splits_path, splits)
+    print(f"[splits] created {splits_path} (seed={splits['seed']}). "
+          f"It is now frozen — every run reuses it until you reshuffle.")
     return splits
 
 

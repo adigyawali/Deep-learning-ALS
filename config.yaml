@@ -103,6 +103,25 @@ augmentations:
 
 # ── K-FOLD CROSS-VALIDATION SPLITS ──────────────────────────────────────────
 cross_validation:
+  # ── WHERE THE SPLIT LIVES (read this once) ─────────────────────────────────
+  # The split is written ONCE to this file and then reused by every run, every
+  # stage, both models, and every --output-dir. It does not change on its own.
+  # That is what makes two independent experiments comparable: they are scored
+  # on the IDENTICAL held-out test subjects, so a difference in their numbers is
+  # a difference in the models, not in which patients happened to land in test.
+  #
+  #   python experiment.py --model cnn_nnmamba splits              # show it
+  #   python experiment.py --model cnn_nnmamba splits --reshuffle  # draw a NEW one
+  #   python experiment.py --model cnn_nnmamba splits --reshuffle --seed 7
+  #
+  # Reshuffling picks a fresh random seed and records it in the file, so the new
+  # split is itself reproducible — pass that seed back with --seed to recreate
+  # it exactly. Re-running with the SAME seed always gives the SAME folds.
+  #
+  # Set to null to go back to a per-experiment split at <output-dir>/splits.json
+  # (the old behaviour — two --output-dir runs then get separate files).
+  splits_file: splits.json   # relative paths are from the project root
+
   # mode: auto     -> generate stratified, subject-level folds automatically.
   #                   Reproducible from 'seed'. Good default.
   # mode: explicit -> use EXACTLY the patient IDs you list below. Nothing is

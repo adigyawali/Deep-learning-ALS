@@ -9,8 +9,14 @@ Pick a model with ``--model`` and run the whole pipeline (or named stages):
     python experiment.py --model cnn_vit train_vit evaluate   # just these stages
 
 Stages:
-  cnn_vit     : preprocess train_cnn extract_features train_vit evaluate gradcam
-  cnn_nnmamba : preprocess train_nnmamba evaluate
+  cnn_vit     : preprocess splits train_cnn extract_features train_vit evaluate gradcam
+  cnn_nnmamba : preprocess splits train_nnmamba evaluate
+
+The CV split is frozen in one file and reused by every run, so two experiments
+are always scored on the identical held-out test set. Inspect or re-draw it:
+
+    python experiment.py --model cnn_nnmamba splits              # show it
+    python experiment.py --model cnn_nnmamba splits --reshuffle  # draw a new one
 
 ``all`` (the default) runs every stage for the chosen model except gradcam.
 Every stage is idempotent where outputs already exist. Training saves only the
@@ -35,8 +41,8 @@ from als.paths import build_run_paths  # noqa: E402
 from als.seed import resolve_device, set_seed  # noqa: E402
 
 STAGE_ORDER = {
-    "cnn_vit": ["preprocess", "train_cnn", "extract_features", "train_vit", "evaluate"],
-    "cnn_nnmamba": ["preprocess", "train_nnmamba", "evaluate"],
+    "cnn_vit": ["preprocess", "splits", "train_cnn", "extract_features", "train_vit", "evaluate"],
+    "cnn_nnmamba": ["preprocess", "splits", "train_nnmamba", "evaluate"],
 }
 ALL_STAGES = {
     "cnn_vit": STAGE_ORDER["cnn_vit"] + ["gradcam"],
@@ -76,6 +82,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-frequency", action="store_true",
                    help="Disable the FFT frequency stream (use_frequency=false ablation).")
     # preprocess passthrough
+    # splits
+    p.add_argument("--reshuffle", action="store_true",
+                   help="splits stage: draw a NEW train/test split and freeze it (otherwise show).")
+    p.add_argument("--seed", type=int, default=None,
+                   help="splits stage: reshuffle to this exact seed instead of a random one.")
     p.add_argument("--nonlinear", action="store_true", help="SyN T1→MNI registration (preprocess).")
     p.add_argument("--limit", type=int, default=0, help="Limit preprocessed triplets (debug).")
     # extract / gradcam
@@ -110,12 +121,16 @@ def main() -> int:
         cfg = cfgmod.apply_smoke(cfg)
         # Smoke must never block on a network weight download.
         os.environ.setdefault("ALS_SKIP_PRETRAINED", "1")
-        # Preprocessing needs raw data + ANTs; not part of a wiring check.
-        stages = [s for s in stages if s != "preprocess"]
+        # Preprocessing needs raw data + ANTs; not part of a wiring check. The
+        # splits stage is skipped too: smoke pins its own tiny 2-fold split.
+        stages = [s for s in stages if s not in ("preprocess", "splits")]
 
     set_seed(cfg.get("seed", 42))
     device = resolve_device(args.device)
-    paths = build_run_paths(model, args.output_dir).ensure()
+    paths = build_run_paths(
+        model, args.output_dir,
+        splits_file=cfgmod.get(cfg, "cross_validation", "splits_file"),
+    ).ensure()
 
     from als.models.components.mamba_block import MAMBA_BACKEND
     git = ""
@@ -141,6 +156,10 @@ def main() -> int:
             if rc not in (0, None):
                 print(f"Stage preprocess failed (rc={rc}). Stopping.", file=sys.stderr)
                 return rc
+            continue
+        if stage == "splits":
+            from als.stages import make_splits
+            make_splits.run(cfg, paths, device, reshuffle=args.reshuffle, seed=args.seed)
             continue
         if stage == "train_cnn":
             from als.stages import train_cnn

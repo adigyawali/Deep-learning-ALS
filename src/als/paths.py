@@ -75,12 +75,30 @@ class RunPaths:
         )
 
 
-def build_run_paths(model: str, output_root: Path | str | None = None) -> RunPaths:
-    """Return the output paths for ``model`` under ``output_root`` (default runs/)."""
+def build_run_paths(
+    model: str,
+    output_root: Path | str | None = None,
+    splits_file: Path | str | None = None,
+) -> RunPaths:
+    """Return the output paths for ``model`` under ``output_root`` (default runs/).
+
+    ``splits_file`` (from ``cross_validation.splits_file`` in ``config.yaml``)
+    pins the CV split to one canonical location *outside* ``output_root``. That
+    is what makes two experiments written to different ``--output-dir`` folders
+    share the identical held-out test set, so their scores are comparable.
+    Without it the split defaults to ``<output_root>/splits.json``, i.e. one per
+    experiment directory.
+    """
     if model not in MODELS:
         raise ValueError(f"Unknown model {model!r}. Choices: {MODELS}")
     root_out = Path(output_root) if output_root else DEFAULT_OUTPUT_ROOT
     run_root = root_out / model
+    if splits_file:
+        splits_path = Path(splits_file)
+        if not splits_path.is_absolute():
+            splits_path = PROJECT_ROOT / splits_path   # relative to the repo, not the cwd
+    else:
+        splits_path = root_out / "splits.json"
     return RunPaths(
         model=model,
         root=run_root,
@@ -89,5 +107,5 @@ def build_run_paths(model: str, output_root: Path | str | None = None) -> RunPat
         metrics=run_root / "metrics",
         logs=run_root / "logs",
         config_json=run_root / "config.json",
-        splits_path=root_out / "splits.json",
+        splits_path=splits_path,
     )
