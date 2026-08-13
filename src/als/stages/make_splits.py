@@ -119,5 +119,6 @@ def run(cfg: dict, paths: RunPaths, device=None, *,
     print()
     _report(splits, samples, splits_path)
     print()
-    print(f"[splits] FROZEN. Every run now uses this split until you reshuffle again.")
-    print(f"[splits] To recreate it exactly: splits --reshuffle --seed {splits['seed']}")
+    print("[splits] FROZEN. Every run uses this split until you reshuffle again.")
+    print(f"[splits] (seed {splits['seed']} is recorded in the file — you never need to type it; "
+          f"it only exists so this exact split can be recreated later if you ever want to.)")
