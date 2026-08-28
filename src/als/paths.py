@@ -22,6 +22,12 @@ shared at ``runs/splits.json`` so both models train/eval on the same subjects.
         fold0/ ... fold4/
           checkpoints/              # nnmamba_best.pt  (best weights only)
           metrics/  logs/
+      nnmamba/                      # one-stage Mamba (no CNN); same tree as above
+        config.json
+        metrics/
+        fold0/ ... fold4/
+          checkpoints/              # nnmamba_best.pt
+          metrics/  logs/
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = PROJECT_ROOT / "Data" / "processed"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "runs"
 
-MODELS = ("cnn_vit", "cnn_nnmamba")
+MODELS = ("cnn_vit", "cnn_nnmamba", "nnmamba")
 
 
 @dataclass(frozen=True)

@@ -16,8 +16,10 @@ seed: 42
 data:
   data_dir: null                # null -> Data/processed
   target_shape: [128, 128, 128]
-  use_frequency: true           # false -> spatial tokens only (clean ablation). Switches the
-                                # model's frequency branch; the input is always 3 channels.
+  streams: both                 # both | spatial | frequency — which token streams the Mamba
+                                # sees. Keep this the SAME as configs/cnn_nnmamba.yaml, or this
+                                # ablation stops being about the pretrained weights alone.
+                                # See configs/cnn_nnmamba.yaml for the full explanation.
   aug_level: heavy              # FALLBACK preset only — the root config.yaml `augmentations:`
                                 # section overrides this when present (single source of truth).
 

@@ -25,10 +25,10 @@ from collections import defaultdict
 import torch
 from torch.utils.data import Subset
 
-from ..config import get
+from ..config import get, resolve_streams
 from ..data.feature_dataset import ALSSpatialFeatureDataset
 from ..data.volume_dataset import VolumeDataset
-from ..models.cnn_nnmamba import CNNnnMamba
+from ..models import build_volume_model
 from ..models.cnn_vit import SpatialMultiModalViT
 from ..paths import DEFAULT_DATA_DIR, RunPaths
 from ..splits import indices_from_split, n_folds_in, read_splits
@@ -64,19 +64,22 @@ def _load_fold_target(cfg: dict, paths: RunPaths, fold: int, device, shared_ds):
         model.eval()
         return ds, ds.samples, vit_forward, model, blob
 
-    # cnn_nnmamba — the raw-volume dataset is shared across folds; only the
-    # checkpoint changes per fold.
+    # cnn_nnmamba / nnmamba — the raw-volume dataset is shared across folds; only
+    # the checkpoint changes per fold.
     ckpt = fpaths.checkpoints / "nnmamba_best.pt"
     if not ckpt.exists() or len(shared_ds) == 0:
         return None
     blob = torch.load(ckpt, map_location=device, weights_only=False)
-    mc = blob.get("config", {}).get("nnmamba", {}) or cfg.get("nnmamba", {})
-    model = CNNnnMamba(
-        use_frequency=bool(get(cfg, "data", "use_frequency", default=True)),
-        base=mc.get("base", 32), blocks=mc.get("blocks", 3), token_grid=mc.get("token_grid", 4),
-        mamba_layers=mc.get("mamba_layers", 2), d_state=mc.get("d_state", 16), dropout=mc.get("dropout", 0.1),
-        spatial_encoder=mc.get("spatial_encoder", "scratch"), backbone=mc.get("backbone", "resnet10"),
-        freeze_backbone=mc.get("freeze_backbone", True), pretrained_d_model=mc.get("pretrained_d_model", 256),
+    # Rebuild from the config stored IN the checkpoint wherever possible: that is
+    # the architecture whose weights are about to be loaded. Falling back to the
+    # live cfg (older checkpoints saved none) can only ever be a guess.
+    ck_cfg = blob.get("config") or {}
+    mc = ck_cfg.get("nnmamba") or cfg.get("nnmamba", {})
+    streams = resolve_streams(ck_cfg if ck_cfg.get("data") else cfg)
+    model = build_volume_model(
+        cfg["model"], mc, streams=streams,
+        input_shape=tuple(get(ck_cfg if ck_cfg.get("data") else cfg,
+                              "data", "target_shape", default=[128, 128, 128])),
         load_pretrained=False,  # the checkpoint carries the backbone weights; no download needed
     ).to(device)
     model.load_state_dict(blob["model_state_dict"])
@@ -125,9 +128,10 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     splits = read_splits(paths.splits_path)
     n_folds = n_folds_in(splits)
 
-    # nnMamba reuses one raw-volume dataset across folds; ViT rebuilds per fold.
+    # Both Mamba models reuse one raw-volume dataset across folds; ViT rebuilds
+    # per fold (its features are fold-specific).
     shared_ds = None
-    if cfg["model"] == "cnn_nnmamba":
+    if cfg["model"] in ("cnn_nnmamba", "nnmamba"):
         data_dir = get(cfg, "data", "data_dir") or DEFAULT_DATA_DIR
         shared_ds = VolumeDataset(
             data_dir, return_mode="stack",

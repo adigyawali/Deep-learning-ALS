@@ -1,4 +1,10 @@
-"""Stage: train the end-to-end CNN→nnMamba model on raw volumes."""
+"""Stage: train a raw-volume Mamba classifier — either variant.
+
+Serves both ``--model cnn_nnmamba`` (two-stage: CNN stem → Mamba) and
+``--model nnmamba`` (one-stage: patch embedding → Mamba, no CNN). The two differ
+only in the module built from the ``nnmamba:`` config block; the dataset, folds,
+loss, and training loop are identical, which is what makes them comparable.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +12,10 @@ import torch
 from torch.utils.data import Subset
 
 from .. import sanity
-from ..config import get
+from ..config import get, resolve_streams
 from ..data.mixup import build_mixup
 from ..data.volume_dataset import VolumeDataset
-from ..models.cnn_nnmamba import CNNnnMamba
+from ..models import build_volume_model
 from ..models.components.mamba_block import MAMBA_BACKEND
 from ..paths import DEFAULT_DATA_DIR, RunPaths
 from ..splits import indices_from_split, n_folds_in, resolve_splits
@@ -20,24 +26,49 @@ from ..training.optim import (
 from ._common import make_loader, smoke_trim, volume_forward
 
 
+# Above this many tokens the pure-PyTorch Mamba fallback stops being "adequate":
+# its scan is an O(L) Python loop, so wall-clock grows faster than linearly in L.
+# Measured on CPU at 128³ / d_model 192 / 4 bidirectional layers, one fwd+bwd at
+# batch 2: 128 tokens 1.5s, 512 tokens 16s, 1024 tokens 68s.
+_SLOW_FALLBACK_TOKENS = 256
+
+
+def _warn_if_sequence_is_slow(model, model_name: str) -> None:
+    """Say so loudly when the token sequence is long AND the backend is the slow one."""
+    seq = getattr(model, "sequence_length", None)
+    if seq is None or MAMBA_BACKEND != "pytorch-fallback" or seq <= _SLOW_FALLBACK_TOKENS:
+        return
+    lever = ("nnmamba.patch_size (16 -> 32 cuts the sequence 8x)" if model_name == "nnmamba"
+             else "nnmamba.token_grid (4 -> 3 cuts the sequence ~2.4x)")
+    print(f"[{model_name}] WARNING: Mamba sequence is {seq} tokens and the active backend is "
+          f"'pytorch-fallback', whose scan is an O(L) Python loop — this will be very slow.\n"
+          f"[{model_name}]   Fix, best first: install the mamba-ssm CUDA kernel; "
+          f"raise {lever}; or use data.streams: spatial (halves the sequence).")
+
+
 def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
+    model_name = cfg["model"]
     data_dir = get(cfg, "data", "data_dir") or DEFAULT_DATA_DIR
     target_shape = tuple(get(cfg, "data", "target_shape", default=[128, 128, 128]))
-    use_frequency = bool(get(cfg, "data", "use_frequency", default=True))
+    streams = resolve_streams(cfg)
     aug_level = get(cfg, "data", "aug_level", default="medium")
     aug_config = cfg.get("augmentations")   # from root config.yaml (source of truth)
     mixup = build_mixup(aug_config)         # batch-level, so applied by the trainer
     m = cfg["nnmamba"]
-    spatial_encoder = m.get("spatial_encoder", "scratch")
-    print(f"[nnmamba] Mamba backend: {MAMBA_BACKEND}  use_frequency={use_frequency}  "
-          f"spatial_encoder={spatial_encoder}"
-          + (f" (backbone={m.get('backbone', 'resnet10')}, "
-             f"freeze={m.get('freeze_backbone', True)})" if spatial_encoder == "pretrained" else ""))
+    if model_name == "cnn_nnmamba":
+        spatial_encoder = m.get("spatial_encoder", "scratch")
+        arch = f"two-stage (CNN→Mamba)  spatial_encoder={spatial_encoder}" + (
+            f" (backbone={m.get('backbone', 'resnet10')}, "
+            f"freeze={m.get('freeze_backbone', True)})" if spatial_encoder == "pretrained" else "")
+    else:
+        arch = (f"one-stage (patch→Mamba, no CNN)  patch_size={m.get('patch_size', 16)} "
+                f"d_model={m.get('d_model', 192)} bidirectional={m.get('bidirectional', True)}")
+    print(f"[{model_name}] Mamba backend: {MAMBA_BACKEND}  streams={streams}  {arch}")
 
     full = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
                          transform=False)
     if len(full) < 3:
-        print(f"[nnmamba] Error: fewer than 3 samples in {data_dir}.")
+        print(f"[{model_name}] Error: fewer than 3 samples in {data_dir}.")
         return
     train_aug = VolumeDataset(data_dir, return_mode="stack", target_shape=target_shape,
                               transform=True, aug_level=aug_level, aug_config=aug_config)
@@ -51,15 +82,15 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
     n_folds = n_folds_in(splits)
     dl = cfg.get("dataloader", {})
 
-    # Train one independent nnMamba per CV fold, each into runs/cnn_nnmamba/fold{k}/.
+    # Train one independent Mamba model per CV fold, each into runs/<model>/fold{k}/.
     for fold in range(n_folds):
         fpaths = paths.fold(fold).ensure()
         train_idx = smoke_trim(indices_from_split(meta, splits, "train", fold), cfg)
         val_idx = smoke_trim(indices_from_split(meta, splits, "val", fold), cfg)
         if not train_idx or not val_idx:
-            print(f"[nnmamba] fold {fold}: empty train or val split — skipping.")
+            print(f"[{model_name}] fold {fold}: empty train or val split — skipping.")
             continue
-        print(f"\n[nnmamba] ===== fold {fold + 1}/{n_folds} "
+        print(f"\n[{model_name}] ===== fold {fold + 1}/{n_folds} "
               f"(train={len(train_idx)} val={len(val_idx)}) =====")
 
         train_loader = make_loader(Subset(train_aug, train_idx), batch_size=m["batch_size"],
@@ -67,14 +98,11 @@ def run(cfg: dict, paths: RunPaths, device: torch.device) -> None:
         val_loader = make_loader(Subset(full, val_idx), batch_size=m["batch_size"],
                                  shuffle=False, dl_cfg=dl, device=device)
 
-        model = CNNnnMamba(
-            use_frequency=use_frequency, base=m.get("base", 32), blocks=m.get("blocks", 3),
-            token_grid=m.get("token_grid", 4), mamba_layers=m.get("mamba_layers", 2),
-            d_state=m.get("d_state", 16), dropout=m.get("dropout", 0.1),
-            spatial_encoder=spatial_encoder, backbone=m.get("backbone", "resnet10"),
-            freeze_backbone=m.get("freeze_backbone", True),
-            pretrained_d_model=m.get("pretrained_d_model", 256),
+        model = build_volume_model(
+            model_name, m, streams=streams, input_shape=target_shape,
         ).to(device)
+        if fold == 0:
+            _warn_if_sequence_is_slow(model, model_name)
 
         pw = pos_weight_from_labels([meta[i].label for i in train_idx])
         criterion = SmoothBCEWithLogitsLoss(

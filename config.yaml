@@ -1,6 +1,6 @@
 # ============================================================================
 # EXPERIMENT CONFIG — the single source of truth for DATA AUGMENTATIONS and
-# K-FOLD CROSS-VALIDATION SPLITS. Shared by BOTH models (cnn_vit, cnn_nnmamba).
+# K-FOLD CROSS-VALIDATION SPLITS. Shared by ALL models (cnn_vit, cnn_nnmamba, nnmamba).
 #
 #
 # When training starts, the pipeline reads this file automatically.
@@ -105,7 +105,7 @@ augmentations:
 cross_validation:
   # ── WHERE THE SPLIT LIVES (read this once) ─────────────────────────────────
   # The split is written ONCE to this file and then reused by every run, every
-  # stage, both models, and every --output-dir. It does not change on its own.
+  # stage, every model, and every --output-dir. It does not change on its own.
   # That is what makes two independent experiments comparable: they are scored
   # on the IDENTICAL held-out test subjects, so a difference in their numbers is
   # a difference in the models, not in which patients happened to land in test.

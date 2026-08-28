@@ -106,3 +106,42 @@ class MambaLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.dropout(self.mamba(self.norm(x)))
+
+
+class BiMambaLayer(nn.Module):
+    """Pre-norm residual Mamba scanned forwards **and** backwards, then averaged.
+
+    Mamba's recurrence is causal, so in a plain ``MambaLayer`` token *t* is built
+    only from tokens ``<= t``. That is tolerable when a CNN has already given each
+    token a wide receptive field (``CNNnnMamba``), but not when the tokens are raw
+    patch projections with no context at all (``NNMamba``): the first patches in
+    the flattened 3D scan order would see nothing. Two independent scans over the
+    sequence and its reverse give every token both sides of the volume for the cost
+    of one extra scan per layer.
+
+    Same ``(B, L, D) -> (B, L, D)`` interface as ``MambaLayer``, so the two are
+    interchangeable.
+    """
+
+    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.forward_mamba = make_mamba(d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.backward_mamba = make_mamba(d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        fwd = self.forward_mamba(h)
+        bwd = self.backward_mamba(h.flip(1)).flip(1)
+        # Mean (not sum) so the residual branch keeps the scale of a single scan.
+        return x + self.dropout(0.5 * (fwd + bwd))
+
+
+def make_mamba_layer(
+    d_model: int, *, d_state: int = 16, d_conv: int = 4, expand: int = 2,
+    dropout: float = 0.1, bidirectional: bool = False,
+) -> nn.Module:
+    """``BiMambaLayer`` when ``bidirectional`` else ``MambaLayer``."""
+    cls = BiMambaLayer if bidirectional else MambaLayer
+    return cls(d_model, d_state=d_state, d_conv=d_conv, expand=expand, dropout=dropout)

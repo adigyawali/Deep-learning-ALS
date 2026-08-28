@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from .models.components.streams import resolve_stream_mode
 from .paths import PROJECT_ROOT
 
 CONFIG_DIR = PROJECT_ROOT / "configs"
@@ -56,6 +57,19 @@ def _merge_root_config(cfg: dict) -> None:
 def _train_section(cfg: dict) -> dict:
     """The model-specific hyperparameter block ('vit'+'cnn' or 'nnmamba')."""
     return cfg["cnn" if cfg["model"] == "cnn_vit" else "nnmamba"]
+
+
+def resolve_streams(cfg: dict) -> str:
+    """Which Mamba token streams this config asks for: both / spatial / frequency.
+
+    Reads ``data.streams``, falling back to the older ``data.use_frequency``
+    boolean (true → both, false → spatial) so configs and checkpoints written
+    before ``streams`` existed keep their original meaning. Both models and the
+    evaluation stage call this, so they can never disagree about what a config
+    means.
+    """
+    data = cfg.get("data") or {}
+    return resolve_stream_mode(data.get("streams"), data.get("use_frequency"))
 
 
 def apply_overrides(cfg: dict, *, batch_size=None, epochs=None, lr=None,
@@ -106,6 +120,11 @@ def apply_smoke(cfg: dict) -> dict:
     if cfg["model"] == "cnn_vit":
         cfg["cnn"].update({"backbone": "resnet10", "epochs": 2, "batch_size": 2, "freeze_backbone": False})
         cfg["vit"].update({"embed_dim": 32, "depth": 2, "num_heads": 2, "epochs": 2, "batch_size": 2})
+    elif cfg["model"] == "nnmamba":
+        # 32³ input with patch 16 → a 2³ = 8-token grid per stream: enough to
+        # exercise patchify → streams → Mamba → head without being slow on CPU.
+        cfg["nnmamba"].update({"patch_size": 16, "d_model": 32, "mamba_layers": 1,
+                               "epochs": 2, "batch_size": 2, "grad_accum_steps": 1})
     else:
         # Force the from-scratch stem: a wiring check must stay fast and must not
         # depend on a MedicalNet download (the pretrained path has its own test).

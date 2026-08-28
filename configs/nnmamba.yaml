@@ -1,0 +1,99 @@
+# ONE-STAGE nnMamba — no CNN at all.
+#
+# The preprocessed volumes go straight into the Mamba stack: they are cut into
+# non-overlapping 3D patches, each patch becomes one token via a single linear
+# projection, and the selective state-space stack does all the representation
+# learning.  Compare against configs/cnn_nnmamba.yaml (same data, same folds,
+# same loss) to measure how much the convolutional prior is actually worth:
+#
+#   python experiment.py --model nnmamba
+#
+#   (B, 3, 128, 128, 128)
+#        -> PatchEmbed3D          one strided linear map; FUSES T1/T2/FLAIR here
+#        -> (B, d_model, 8, 8, 8) the patch grid
+#        -> spatial tokens  ++  FFT-log-magnitude tokens   (concat + pos-embed)
+#        -> BiMamba x mamba_layers -> LayerNorm -> mean over tokens
+#        -> Linear -> 1 logit
+seed: 42
+
+data:
+  data_dir: null                # null -> Data/processed
+  target_shape: [128, 128, 128] # MUST be divisible by nnmamba.patch_size below —
+                                # the model raises a clear error otherwise.
+
+  # ── WHICH TOKEN STREAMS REACH THE MAMBA STACK ────────────────────────────
+  # Identical meaning to configs/cnn_nnmamba.yaml, so the ablation is comparable
+  # across the two models.  Patch embedding, Mamba stack and head are the same in
+  # all three settings — only the token sequence changes.
+  #
+  #   both      : spatial tokens THEN frequency tokens (2 * N tokens).  Default.
+  #   spatial   : spatial tokens only (N).  Fastest.
+  #   frequency : FFT-log-magnitude tokens only (N).
+  #
+  # N = (128/patch_size)^3 = 512 at the defaults.  Override per run with
+  #   python experiment.py --model nnmamba --streams spatial
+  streams: both
+
+  aug_level: heavy              # FALLBACK preset only — the root config.yaml `augmentations:`
+                                # section overrides this when present (single source of truth).
+
+# FALLBACK only. Augmentations AND folds are configured in the root config.yaml
+# (`augmentations:` and `cross_validation:`), which overrides this `split:` block
+# whenever config.yaml is present. Kept so the pipeline still works without it.
+split:
+  n_folds: 5                    # 5-fold stratified CV over the 80% CV pool
+  test_ratio: 0.2               # fixed, subject-level held-out test set
+
+dataloader:
+  num_workers: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+# The hyperparameter block is named `nnmamba:` for BOTH Mamba models, so the
+# shared train/evaluate stages read one key. The stem knobs differ, of course:
+# there is no spatial_encoder / backbone / freeze_backbone here — this model has
+# no CNN and therefore no MedicalNet transfer learning. ALS_REQUIRE_PRETRAINED
+# and ALS_MEDICALNET_WEIGHTS have no effect on this model.
+nnmamba:
+  # ── Patch embedding (the only thing between the voxels and the Mamba) ─────
+  patch_size: 16                # THE sequence-length lever. Tokens per stream =
+                                # (target_shape / patch_size)^3:
+                                #   16 -> 8^3  =  512 tokens/stream (1024 with streams: both)
+                                #   32 -> 4^3  =   64 tokens/stream
+                                # Raise it if the pure-PyTorch Mamba fallback is slow
+                                # (its scan is an O(L) Python loop) or if VRAM is tight.
+                                # target_shape must stay divisible by this.
+  d_model: 192                  # token width. The patch projection holds 3*patch_size^3*d_model
+                                # parameters (~2.4M at 16/192), which is where most of this
+                                # model's capacity — and its overfitting risk — lives.
+
+  # ── Mamba stack (shared across both token streams) ────────────────────────
+  mamba_layers: 4               # deeper than cnn_nnmamba's 2: with no CNN, all of the
+                                # representation learning happens here.
+  d_state: 16
+  bidirectional: true           # scan the sequence forwards AND backwards, then average.
+                                # Mamba is causal, and here a token IS its patch with no
+                                # receptive field, so a forward-only scan would leave the
+                                # first patches of the volume with no context. Costs one
+                                # extra scan per layer. false = the cnn_nnmamba behaviour.
+  dropout: 0.3
+
+  # ── Optimisation ──────────────────────────────────────────────────────────
+  epochs: 100
+  batch_size: 2
+  grad_accum_steps: 2           # effective batch 4 at low per-step VRAM
+  lr: 3.0e-4                    # higher than cnn_nnmamba's 1e-4: every parameter here is
+                                # trained from scratch, none are a frozen pretrained stem.
+  weight_decay: 0.05
+  warmup_epochs: 5
+
+train:
+  best_metric: roc_auc
+  label_smoothing: 0.1
+  early_stop_patience: 20
+  clip_grad: 1.0
+  amp: bf16
+
+eval:
+  bootstrap_n: 2000

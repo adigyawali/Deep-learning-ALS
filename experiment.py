@@ -5,12 +5,19 @@ Pick a model with ``--model`` and run the whole pipeline (or named stages):
 
     python experiment.py --model cnn_vit                 # full CNN→ViT pipeline
     python experiment.py --model cnn_nnmamba             # full CNN→nnMamba pipeline
+    python experiment.py --model nnmamba                 # one-stage Mamba, no CNN
     python experiment.py --model cnn_nnmamba --smoke     # tiny end-to-end wiring check
     python experiment.py --model cnn_vit train_vit evaluate   # just these stages
+
+Models:
+  cnn_vit     : two-stage — tri-stream 3D CNN, then a ViT over its feature maps.
+  cnn_nnmamba : two-stage — one CNN stem, then a Mamba over spatial+frequency tokens.
+  nnmamba     : ONE stage — 3D patch embedding straight into Mamba, no CNN at all.
 
 Stages:
   cnn_vit     : preprocess splits train_cnn extract_features train_vit evaluate gradcam
   cnn_nnmamba : preprocess splits train_nnmamba evaluate
+  nnmamba     : preprocess splits train_nnmamba evaluate
 
 The CV split is frozen in one file and reused by every run, so two experiments
 are always scored on the identical held-out test set. Inspect or re-draw it:
@@ -43,10 +50,14 @@ from als.seed import resolve_device, set_seed  # noqa: E402
 STAGE_ORDER = {
     "cnn_vit": ["preprocess", "splits", "train_cnn", "extract_features", "train_vit", "evaluate"],
     "cnn_nnmamba": ["preprocess", "splits", "train_nnmamba", "evaluate"],
+    # Same stage list as cnn_nnmamba: the one-stage model differs only in the
+    # module the train_nnmamba stage builds, not in the pipeline around it.
+    "nnmamba": ["preprocess", "splits", "train_nnmamba", "evaluate"],
 }
 ALL_STAGES = {
     "cnn_vit": STAGE_ORDER["cnn_vit"] + ["gradcam"],
     "cnn_nnmamba": STAGE_ORDER["cnn_nnmamba"],
+    "nnmamba": STAGE_ORDER["nnmamba"],
 }
 
 
@@ -63,7 +74,7 @@ def _run_preprocess(args) -> int:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unified ALS pipeline driver.")
-    p.add_argument("--model", required=True, choices=["cnn_vit", "cnn_nnmamba"])
+    p.add_argument("--model", required=True, choices=["cnn_vit", "cnn_nnmamba", "nnmamba"])
     p.add_argument("stages", nargs="*", default=["all"],
                    help="Stage names or 'all' (default). See module docstring.")
     p.add_argument("--config", type=str, default=None, help="Override configs/<model>.yaml.")
@@ -76,11 +87,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--num-workers", type=int, default=None)
-    # ablation overrides (cnn_nnmamba)
+    # ablation overrides (cnn_nnmamba / nnmamba)
     p.add_argument("--spatial-encoder", choices=["scratch", "pretrained"], default=None,
-                   help="nnMamba spatial stream: 'pretrained' (MedicalNet transfer) or 'scratch'.")
+                   help="cnn_nnmamba only: 'pretrained' (MedicalNet transfer) or 'scratch'.")
+    p.add_argument("--streams", choices=["both", "spatial", "frequency"], default=None,
+                   help="Which Mamba token streams to use. Overrides data.streams in the YAML.")
     p.add_argument("--no-frequency", action="store_true",
-                   help="Disable the FFT frequency stream (use_frequency=false ablation).")
+                   help="Alias for --streams spatial (the spatial-only ablation).")
     # preprocess passthrough
     # splits
     p.add_argument("--reshuffle", action="store_true",
@@ -113,8 +126,15 @@ def main() -> int:
                                  lr=args.lr, num_workers=args.num_workers)
     if args.data_dir:
         cfg.setdefault("data", {})["data_dir"] = args.data_dir
-    if args.no_frequency:
-        cfg.setdefault("data", {})["use_frequency"] = False
+    if args.streams and args.no_frequency and args.streams != "spatial":
+        print(f"--streams {args.streams} conflicts with --no-frequency (which means "
+              f"--streams spatial). Pass only one.", file=sys.stderr)
+        return 2
+    # Written into data.streams, which is what the models and evaluate.py read.
+    # data.use_frequency is left alone so a stale value can never override this.
+    if args.streams or args.no_frequency:
+        cfg.setdefault("data", {})["streams"] = args.streams or "spatial"
+        cfg["data"].pop("use_frequency", None)
     if args.spatial_encoder and model == "cnn_nnmamba":
         cfg.setdefault("nnmamba", {})["spatial_encoder"] = args.spatial_encoder
     if args.smoke:

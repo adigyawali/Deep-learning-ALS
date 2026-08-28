@@ -11,7 +11,7 @@ Shape of the model:
         ├───────────────┐
       spatial          FFT log-magnitude → 1×1×1 projection
         │               │
-      pool→N tokens   pool→N tokens
+      pool→N tokens   pool→N tokens     (either stream can be switched off)
         └──── concat along the SEQUENCE axis (+ learned stream embedding) ────┘
         │
     (B, 2N, d_model)  →  Mamba × L  →  LayerNorm  →  mean over tokens
@@ -35,9 +35,11 @@ Design notes:
     independently and only met at the classifier. Note Mamba is causal: the
     frequency tokens come second and therefore see the spatial ones, not the
     other way round. The stream embedding is what keeps them distinguishable.
-  * **``use_frequency=False`` drops the frequency tokens only.** The CNN stem,
-    the Mamba stack, and the head are otherwise identical, so spatial-only vs
-    spatial+frequency is a clean one-factor ablation.
+  * **``streams`` selects which token streams reach the Mamba stack** —
+    ``"both"`` (default), ``"spatial"``, or ``"frequency"``. The CNN stem, the
+    Mamba stack, and the head are identical in all three, so the comparison is a
+    clean one-factor ablation: only the token sequence changes. The older boolean
+    ``use_frequency`` still works and maps to ``"both"`` / ``"spatial"``.
   * **Optional transfer learning for the stem** (``spatial_encoder="pretrained"``).
     Training a 3D conv stem from scratch on ~380 subjects is the dominant cause
     of the train→test overfitting gap; the pretrained stem is a MedicalNet 3D
@@ -64,6 +66,7 @@ import torch.nn as nn
 from .components.cnn_backbone import backbone_forward_features, build_medicalnet_backbone
 from .components.frequency import freq_magnitude
 from .components.mamba_block import MambaLayer
+from .components.streams import active_streams, resolve_stream_mode
 
 
 def _gn(channels: int) -> nn.GroupNorm:
@@ -127,12 +130,15 @@ class PretrainedStem(nn.Module):
 
 class CNNnnMamba(nn.Module):
     SPATIAL_CHANNELS = 3
-    SPATIAL_STREAM = 0
-    FREQ_STREAM = 1
+    # Canonical stream order. When both are active the spatial tokens come first,
+    # so row 0 of ``stream_embed`` is always spatial and row 1 always frequency —
+    # which keeps checkpoints written before ``streams`` existed loadable.
+    STREAM_ORDER = ("spatial", "frequency")
 
     def __init__(
         self,
-        use_frequency: bool = True,
+        streams: str | None = None,
+        use_frequency: bool | None = None,
         base: int = 32,
         blocks: int = 3,
         token_grid: int = 4,
@@ -146,7 +152,11 @@ class CNNnnMamba(nn.Module):
         load_pretrained: bool = True,
     ):
         super().__init__()
-        self.use_frequency = use_frequency
+        self.streams = resolve_stream_mode(streams, use_frequency)
+        self.active_streams = active_streams(self.streams, self.STREAM_ORDER)
+        self._stream_row = {name: i for i, name in enumerate(self.active_streams)}
+        self.use_spatial = "spatial" in self._stream_row
+        self.use_frequency = "frequency" in self._stream_row
         if spatial_encoder == "pretrained":
             self.stem = PretrainedStem(
                 backbone=backbone, d_model=pretrained_d_model,
@@ -160,18 +170,19 @@ class CNNnnMamba(nn.Module):
         d_model = self.stem.d_model
         self.d_model = d_model
         self.pool = nn.AdaptiveAvgPool3d(token_grid)           # bounds the sequence length
+        self.tokens_per_stream = int(token_grid) ** 3
 
         # The frequency branch is a different domain, so it gets its own learned
         # projection before joining the spatial tokens in one sequence.
         self.freq_proj = nn.Sequential(
             nn.Conv3d(d_model, d_model, kernel_size=1, bias=False),
             _gn(d_model), nn.GELU(),
-        ) if use_frequency else None
+        ) if self.use_frequency else None
 
         # Marks which stream a token came from — without it the concatenated
-        # sequence would be two indistinguishable halves.
-        n_streams = 2 if use_frequency else 1
-        self.stream_embed = nn.Parameter(torch.zeros(n_streams, d_model))
+        # sequence would be two indistinguishable halves. Only the active streams
+        # get a row, so a single-stream ablation carries no dead parameters.
+        self.stream_embed = nn.Parameter(torch.zeros(len(self.active_streams), d_model))
 
         self.mamba = nn.Sequential(*[
             MambaLayer(d_model, d_state=d_state, dropout=dropout) for _ in range(mamba_layers)
@@ -183,12 +194,17 @@ class CNNnnMamba(nn.Module):
             nn.Linear(d_model, 1),
         )
 
-    def _tokens(self, feature_map: torch.Tensor, stream: int) -> torch.Tensor:
+    @property
+    def sequence_length(self) -> int:
+        """Tokens the Mamba stack scans per sample — the main cost driver."""
+        return len(self.active_streams) * self.tokens_per_stream
+
+    def _tokens(self, feature_map: torch.Tensor, stream: str) -> torch.Tensor:
         """``(B, C, d, h, w)`` → ``(B, token_grid³, C)`` plus the stream embedding."""
         f = self.pool(feature_map)                             # (B, C, g, g, g)
         b, c = f.shape[0], f.shape[1]
         f = f.reshape(b, c, -1).transpose(1, 2)                # (B, N, C)
-        return f + self.stream_embed[stream]
+        return f + self.stream_embed[self._stream_row[stream]]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[1] != self.SPATIAL_CHANNELS:
@@ -198,10 +214,14 @@ class CNNnnMamba(nn.Module):
                 f"the CNN feature map, so the dataset must no longer append FFT channels."
             )
         features = self.stem(x)                                # (B, d_model, d, h, w)
-        tokens = self._tokens(features, self.SPATIAL_STREAM)   # (B, N, d_model)
+        # Streams are built in STREAM_ORDER, so with both active the spatial
+        # tokens precede the frequency ones in the sequence Mamba scans.
+        parts: list[torch.Tensor] = []
+        if self.use_spatial:
+            parts.append(self._tokens(features, "spatial"))
         if self.freq_proj is not None:
-            spectrum = self.freq_proj(freq_magnitude(features))
-            tokens = torch.cat([tokens, self._tokens(spectrum, self.FREQ_STREAM)], dim=1)
+            parts.append(self._tokens(self.freq_proj(freq_magnitude(features)), "frequency"))
+        tokens = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
-        z = self.norm(self.mamba(tokens))                      # (B, 2N, d_model)
+        z = self.norm(self.mamba(tokens))                      # (B, n_streams*N, d_model)
         return self.head(z.mean(dim=1))                        # (B, 1)

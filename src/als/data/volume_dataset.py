@@ -12,8 +12,9 @@ class serves three consumers via ``return_mode``:
 
 Both modes hand over the three spatial modalities and nothing else. The nnMamba
 frequency stream is **not** built here: it is derived inside the model from the
-CNN feature map (see ``models/cnn_nnmamba.py``), so this dataset has no
-``use_frequency`` switch and never returns 6 channels.
+CNN feature map (``models/cnn_nnmamba.py``) or the patch embedding
+(``models/nnmamba.py``), so this dataset has no ``streams`` switch and never
+returns 6 channels.
 
 Multi-modal registration is sacred: T1/T2/FLAIR are co-registered, so any
 geometric augmentation is sampled ONCE and applied identically to all three.
