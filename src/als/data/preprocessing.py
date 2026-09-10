@@ -1,61 +1,42 @@
 """
-Multimodal MRI preprocessing for the ALS classification pipeline.
+Multi-modal MRI preprocessing — raw NIfTI in, MNI-space volumes out.
 
-Pipeline per (subject, visit):
+Per (subject, timepoint):
   1. Reorient T1, T2, FLAIR to RAS.
-  2. N4 bias-field correction (optionally masked).
-  3. Register T1 → MNI152 (affine by default; SyN if --nonlinear).
-  4. Register T2 → T1 (rigid) and warp to MNI by composing transforms.
-  5. Register FLAIR → T1 (rigid) and warp to MNI by composing transforms.
-  6. Save the three MNI-space volumes and a QC montage.
+  2. N4 bias-field correction.
+  3. Register T1 → MNI152 (affine; SyN with ``--nonlinear``).
+  4. Register T2 → T1 and FLAIR → T1 (rigid), then compose with the T1→MNI
+     transform so each modality is resampled once.
+  5. Write the three MNI-space volumes plus a QC montage.
 
-Two cohorts are supported, and they share one raw layout (`raw/T1W`, `raw/T2W`,
-`raw/FLAIR`, all subjects mixed together). They differ only in the trailing
-token of the filename:
+Both cohorts share one raw layout (``raw/T1W``, ``raw/T2W``, ``raw/FLAIR``, all
+subjects mixed) and differ only in the trailing token:
 
-    CALSNIC : DATASET_SITE_SUBJECT_MODALITY_VISIT     CALSNIC2_EDM_C005_T1w10_V1
-    CAPTURE : DATASET_SITE_SUBJECT_MODALITY_MONTHS    CAPTURE_CHU_C178_T1w10_00M
+    CALSNIC : CALSNIC2_EDM_C005_T1w10_V1      V1/V2/V3   = visit index
+    CAPTURE : CAPTURE_CHU_C178_T1w10_00M      00M…12M    = months since baseline
 
-`V1/V2/V3` is a visit index; `00M/04M/08M/12M` is months since baseline. Both
-are treated as the same thing — the timepoint that keys the pairing — so a
-subject's timepoints stay distinct samples in either cohort.
+Both are treated as "the timepoint" that keys the pairing, so a subject's
+timepoints stay distinct samples. Pairing is subject-keyed, not sorted-zip: each
+modality folder is scanned into ``{(subject_id, timepoint): file}`` and a sample
+is processed only when all three modalities are present.
 
-Pairing is subject-keyed (NOT sorted-zip). Each modality folder is scanned
-into a dict keyed by (subject_id, timepoint). A (subject, timepoint) is
-processed iff all three modalities are present.
+Rerun files (``_run-02`` / ``_run2``) are the repeat after a failed scan, so they
+are used; only the tag is dropped from the name, and the highest run wins.
 
-Rerun files (`_run-02` in CALSNIC, `_run2` in CAPTURE) are used like any other
-scan — they are the repeat acquisition after a failed first scan, i.e. the good
-one. Only the **suffix itself is ignored**: it is stripped from the processed
-name, so `..._V1_run-02` and `..._V1` are the same sample. When both exist for
-one (subject, timepoint, modality) the highest run wins.
+Modality subdirectories are auto-detected, skull-stripped first (``T1W_synthstrip
+→ T1W``, ``T2W_synthstrip → T2PD_synthstrip → T2W → T2PD``, ``FLAIR_synthstrip →
+FLAIR``); override with ``--t1-subdir`` / ``--t2-subdir`` / ``--flair-subdir``.
 
-The script auto-detects the modality subdirectories, skull-stripped first:
-`T1W_synthstrip → T1W`, `T2W_synthstrip → T2PD_synthstrip → T2W → T2PD`,
-`FLAIR_synthstrip → FLAIR`. The `T2PD*` names cover the dual-echo T2/PD series
-some cohorts are exported as. Override any of them with `--t1-subdir` /
-`--t2-subdir` / `--flair-subdir`. Filenames may also carry a trailing
-`_synthstrip` regardless of which folder they sit in.
-
-The processed folder/sample name keeps the full source structure
-`DATASET_SITE_SUBJECT_TIMEPOINT` (e.g. `CALSNIC2_CAL_C003_V1`,
-`CAPTURE_CHU_C178_00M`), derived from the raw filename minus its extension,
-optional `_synthstrip` suffix, and modality token. Subject grouping/labels are
-still extracted from this name by `src/als/splits.py`.
-
-Output layout (one folder per subject-visit, all three modalities inside):
-    Data/processed/<sample_id>/<sample_id>_T1.nii.gz
-                              /<sample_id>_T2.nii.gz
-                              /<sample_id>_FLAIR.nii.gz
+Output (one folder per subject-timepoint):
+    Data/processed/<sample_id>/<sample_id>_{T1,T2,FLAIR}.nii.gz
     Data/processed/_QC_Snapshots/<sample_id>_QC.png
-    Data/processed/manifest.csv      <-- index of all processed samples
+    Data/processed/manifest.csv        index of every processed sample
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import re
 import sys
 import traceback

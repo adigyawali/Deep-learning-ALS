@@ -1,42 +1,26 @@
 """
-Config-driven MixUp for the 3D multi-modal classifier.
+Config-driven MixUp, applied by the trainer to training batches only.
 
-MixUp (Zhang et al., 2018) trains on convex combinations of pairs of examples:
+    x̃ = λ·xᵢ + (1−λ)·xⱼ      ỹ = λ·yᵢ + (1−λ)·yⱼ      λ ~ Beta(α, α)
 
-    x~ = λ·x_i + (1-λ)·x_j        y~ = λ·y_i + (1-λ)·y_j        λ ~ Beta(α, α)
+It needs two samples at once, so unlike everything in ``augment.py`` it cannot
+live in a per-sample MONAI ``Compose``. Configured under ``augmentations.mixup``
+in the root ``config.yaml``, and off by default.
 
-It is a *batch-level* augmentation, so unlike everything in ``augment.py`` it
-cannot live inside a per-sample MONAI ``Compose`` — it needs two samples and
-their labels at once. It is therefore built here and handed to the trainer,
-which applies it to each training batch just before the model forward. Config
-still owns it: the ``augmentations.mixup`` block of the root ``config.yaml``,
-under the same master ``augmentations.enabled`` switch as everything else.
+Three choices worth knowing:
 
-Why this form is the right one for this project
------------------------------------------------
-* **One λ and one pairing per batch, shared across every input tensor.** T1, T2
-  and FLAIR are co-registered views of one subject, so they must be mixed with
-  the *same* partner and the *same* weight — mixing them independently would
-  fuse three different brains into one "sample". This mirrors the ``geometric``
-  group's rule in ``augment.py``.
-* **Soft targets, not a two-term loss.** The usual implementation returns
-  ``(y_a, y_b, λ)`` and computes ``λ·L(ŷ,y_a) + (1-λ)·L(ŷ,y_b)``. Binary
-  cross-entropy is *linear in the target*, so for our losses that is exactly
-  equal to evaluating the loss once against the mixed target — including with
-  ``pos_weight`` and with ``label_smoothing`` (also linear in the target). The
-  single-target form is used because it needs no change to any loss, keeps
-  ``pos_weight`` class balancing intact, and keeps the trainer's
-  ``(logits, labels)`` contract.
-* **Labels stay in [0,1] for one logit.** The task is binary (control vs ALS)
-  with a single sigmoid output, so a mixed label is just a soft probability —
-  no one-hot expansion is needed, and a control/patient pair yields a target
-  strictly between the classes rather than a nonsensical third class.
-* **α defaults to 0.2.** Beta(0.2, 0.2) is U-shaped: most batches are barely
-  mixed and only a few are near 50/50. That is the conservative setting used
-  for small datasets — strong enough to smooth the decision boundary and curb
-  the memorisation this project is fighting (see Instructions.md §12.5),
-  without destroying the anatomy the encoder has to learn. Raise α toward 0.4
-  for more regularisation; α → 0 disables mixing in all but name.
+  * **One λ and one pairing per batch, shared across every input tensor.** T1/T2/
+    FLAIR are co-registered views of one subject, so mixing them independently
+    would fuse three different brains into one "sample".
+  * **Soft targets, not a two-term loss.** BCE is linear in the target, so
+    evaluating the loss once against the mixed target is exactly equivalent to
+    ``λ·L(ŷ,yᵢ) + (1−λ)·L(ŷ,yⱼ)`` — including with ``pos_weight`` and label
+    smoothing. That keeps every loss and the trainer's contract unchanged.
+  * **α = 0.2** is U-shaped: most batches barely mix, a few mix near 50/50. The
+    conservative small-data setting. Raise toward 0.4 for more regularisation.
+
+While mixup is on the training ROC-AUC is reported as ``nan`` (the targets are
+soft); validation is never mixed.
 """
 
 from __future__ import annotations

@@ -1,16 +1,14 @@
 """
-Mamba (selective state-space) block with an automatic backend fallback.
+Mamba (selective state-space) block, with an automatic backend fallback.
 
-If the official ``mamba-ssm`` CUDA kernel is importable we use it (fast, the
-real thing). Otherwise we fall back to a compact pure-PyTorch implementation of
-the same selective-SSM (S6) recurrence. The fallback is slower per step but has
-zero build dependencies, so the nnMamba pipeline runs — and is smoke-testable —
-on a laptop or any box where the kernel will not build (e.g. an as-yet
-unsupported GPU). Both backends expose the same ``(B, L, D) -> (B, L, D)``
-interface, and ``MAMBA_BACKEND`` records which one is active.
+If the official ``mamba-ssm`` CUDA kernel imports, it is used. Otherwise a
+compact pure-PyTorch implementation of the same selective-SSM (S6) recurrence
+takes over: slower per step, but no build dependencies, so the pipeline runs and
+is smoke-testable anywhere. Both expose ``(B, L, D) -> (B, L, D)`` and
+``MAMBA_BACKEND`` records which is active.
 
-For this project the sequence length is small (a downsampled 3D feature map,
-~hundreds of tokens), so the O(L) Python scan in the fallback is acceptable.
+The fallback's scan is an O(L) Python loop. That is fine for a few hundred
+tokens; see ``configs/nnmamba.yaml`` for the sequence-length knobs if it is slow.
 """
 
 from __future__ import annotations

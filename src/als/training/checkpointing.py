@@ -1,19 +1,14 @@
-"""Best-weights saving shared by every training stage.
+"""
+Best-weights saving, shared by every training stage.
 
-Exactly ONE file is written per stage, into ``runs/<model>/checkpoints/``:
+Exactly one file per stage per fold: ``<prefix>_best.pt``, overwritten only when
+validation improves. It holds just what is needed to rebuild and run the best
+model — weights, the resolved config, the validation-tuned threshold, and the
+best metric.
 
-  * ``<prefix>_best.pt`` — the best-validation snapshot so far, overwritten only
-    when validation improves. It is what evaluation / feature extraction /
-    Grad-CAM / inference load.
-
-This is deliberately NOT a full training checkpoint. It stores only what is
-needed to rebuild and run the best model: the model weights, the resolved config
-(so the eval side can reconstruct the architecture), the validation-tuned
-decision threshold, and the best validation metric (name + value) for the
-report. It intentionally does NOT store optimizer / scheduler / AMP-scaler / RNG
-state or an epoch counter, so there is no per-epoch checkpoint and no
-resume-after-crash: if a run dies, restart it. The best weights saved so far
-stay usable for evaluation.
+It deliberately stores no optimizer / scheduler / scaler / RNG state and no epoch
+counter, so there is no per-epoch checkpoint and no resume: if a run dies,
+restart it. The best file written so far stays valid for evaluation.
 """
 
 from __future__ import annotations

@@ -1,42 +1,27 @@
 """
-Canonical subject-level data splitting (held-out test + 5-fold CV).
+Subject-level data splitting: one held-out test set + K stratified CV folds.
 
-Every stage of every model (CNN training, feature extraction, ViT training,
-nnMamba training, evaluation, Grad-CAM) reads the same ``splits.json`` artifact
-so there is no cross-stage leakage and the two models are compared on the
-*identical* partition. Produce it once with ``write_splits``, reuse forever.
+Every stage of every model reads the same ``splits.json``, so there is no
+cross-stage leakage and the models are compared on the identical partition.
+Produce it once with ``write_splits``, reuse forever.
 
-Split semantics:
-  - One stratified, subject-level **held-out TEST set** (``test_ratio``, default
-    20%) is carved out once and never used for training or threshold tuning.
-  - The remaining subjects form ``n_folds`` (default 5) **stratified folds**.
-    Fold ``k`` supplies the validation set; the other ``n_folds-1`` folds are
-    that fold's training set. So each fold is a train/val split and there are
-    ``n_folds`` of them, all sharing the one fixed test set.
-  - Multi-timepoint subjects (V1/V2/V3, or 00M/04M/12M) are grouped by subject_id so
-    every visit of a subject lands in the same partition (no patient leakage).
-  - Stratification is by label (control / patient), and by site when at least
-    two sites are present and each site has enough subjects per class. Within
-    each stratification bucket the CV-pool subjects are distributed round-robin
-    across folds, which keeps class balance near-identical across folds.
-  - Splits are reproducible: ``splits.json`` records the seed, ratios, fold
-    count, and per-fold / test subject lists, so the file itself is the contract.
+  * A stratified, subject-level **test set** (``test_ratio``, default 20%) is
+    carved out once and never used for training or threshold tuning.
+  * The rest form ``n_folds`` stratified folds; fold *k* is that fold's
+    validation set, the others are its training set.
+  * Multi-timepoint subjects (V1/V2/V3, 00M/04M/12M) are grouped by subject, so
+    every visit of a subject lands in the same partition — no patient leakage.
+  * Stratification is by label, and by site when every (label, site) bucket has
+    at least ``n_folds + 1`` subjects; otherwise it quietly falls back to
+    label-only. The result is recorded in the file.
+  * ``splits.json`` records seed, ratios, fold count and subject lists, so the
+    file itself is the contract.
 
-Folder/file naming assumptions:
-  - Subject tokens look like ``C005``, ``P110`` (one letter + digits).
-  - Folder names look like ``C005_V1``, or the longer raw form
-    ``DATASET_SITE_SUBJECT_VISIT`` — ``CALSNIC2_EDM_C005_V1`` (CALSNIC, visit
-    ``V#``) and ``CAPTURE_CHU_C178_00M`` (CAPTURE, visit = months since
-    baseline). ``extract_subject_id`` handles all of them.
-
-Subject IDs are **dataset-qualified**: CALSNIC and CAPTURE both number their
-participants ``C###``/``P###``, and the numbering is *not* shared — CALSNIC's
-``C003`` and CAPTURE's ``C003`` are different people. Keying on the bare token
-would silently merge them into one "subject". ``extract_subject_id`` therefore
-returns ``CALSNIC_C003`` / ``CAPTURE_C003`` whenever the name carries a dataset
-prefix, and the bare ``C003`` only when it does not (short folder names). The
-trailing study number is dropped (``CALSNIC2`` → ``CALSNIC``) so the waves of
-one cohort stay a single namespace.
+**Subject IDs are dataset-qualified.** CALSNIC and CAPTURE both number people
+``C###``/``P###`` and the numbering is not shared, so ``extract_subject_id``
+returns ``CALSNIC_C003`` / ``CAPTURE_C003`` when the name carries a cohort
+prefix, and the bare ``C003`` when it does not. The trailing study number is
+dropped (``CALSNIC2`` → ``CALSNIC``) so waves of one cohort share a namespace.
 """
 
 from __future__ import annotations
@@ -69,12 +54,6 @@ class SampleMeta:
 
 
 # ─── ID + site extraction ──────────────────────────────────────────────────
-
-def extract_dataset(name: str) -> Optional[str]:
-    """Return the cohort name (e.g. CALSNIC, CAPTURE) if the name carries one."""
-    match = _DATASET_SITE_SUBJECT_RE.match(name)
-    return match.group(1).upper() if match else None
-
 
 def extract_subject_id(name: str, fallback: Optional[str] = None) -> str:
     """

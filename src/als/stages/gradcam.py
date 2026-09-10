@@ -17,7 +17,7 @@ from scipy.ndimage import zoom
 
 from ..config import get
 from ..data.volume_dataset import VolumeDataset
-from ..models.cnn_encoder import ALSTriStreamClassifier
+from ..models.cnn_vit import ALSTriStreamClassifier
 from ..paths import DEFAULT_DATA_DIR, RunPaths
 from ..splits import indices_from_split, read_splits
 

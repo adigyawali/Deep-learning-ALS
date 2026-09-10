@@ -293,8 +293,12 @@ def test_build_volume_model_dispatch():
     c = build_volume_model("cnn_nnmamba", {"base": 8, "blocks": 2, "token_grid": 2,
                                            "mamba_layers": 1}, streams="frequency")
     assert isinstance(c, CNNnnMamba) and c.streams == "frequency"
-    with pytest.raises(ValueError, match="unknown model"):
+    # cnn_vit is a real model, but not one this factory builds: it is two-stage,
+    # so its stages construct the CNN and the ViT themselves.
+    with pytest.raises(ValueError, match="not a single-volume model"):
         build_volume_model("cnn_vit", {})
+    with pytest.raises(ValueError, match="Unknown model"):
+        build_volume_model("does_not_exist", {})
 
 
 def test_sequence_length_reports_the_scanned_token_count():

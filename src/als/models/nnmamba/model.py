@@ -1,78 +1,42 @@
 """
-One-stage nnMamba classifier for ALS — no CNN feature extractor at all.
+One-stage nnMamba classifier — the same Mamba stack with the CNN deleted.
 
-``CNNnnMamba`` is a two-stage model: a 3D CNN turns the volumes into a feature
-map, and only then does the Mamba stack see anything. This model deletes stage
-one. The preprocessed volumes are cut into non-overlapping 3D patches, each patch
-is projected to a token by a single linear map, and the Mamba stack does *all* of
-the representation learning. It exists to answer one question directly — how much
-of the two-stage model's score comes from the convolutional prior, and how much
-from the state-space sequence model?
+The volumes are cut into non-overlapping 3D patches, each patch becomes one
+token through a single linear projection, and the state-space stack does all of
+the representation learning. It exists to measure how much of ``CNNnnMamba``'s
+score comes from the convolutional prior.
 
-Shape of the model:
-
-    (B, 3, D, H, W)                     three co-registered modalities, T1/T2/FLAIR
-        │
-    PatchEmbed3D                        ONE strided linear projection, kernel = stride
-        │                               = patch_size. Fuses the 3 modalities here.
-    E  (B, d_model, D/p, H/p, W/p)      the patch grid — no split yet
-        ├───────────────┐
-      spatial          FFT log-magnitude of E → 1×1×1 projection
-        │               │
-      N tokens        N tokens          N = (D/p)·(H/p)·(W/p); either can be off
+    (B, 3, D, H, W)
+        │  PatchEmbed3D              one strided linear map (kernel = stride =
+        ▼                            patch_size); the 3 modalities fuse HERE
+    E  (B, d_model, D/p, H/p, W/p)   the patch grid — no split yet
+        ├──────────────┐
+     spatial view    FFT log-magnitude of E → 1×1×1 projection
         └──── concat along the SEQUENCE axis (+ per-stream position embed) ────┘
-        │
-    (B, 2N, d_model)  →  BiMamba × L  →  LayerNorm  →  mean over tokens
-        │
-    (B, 1) raw logit
+        ▼
+    (B, 2N, d_model) → BiMamba × L → LayerNorm → mean over tokens → (B, 1) logit
 
-Design notes — the four decisions that define this architecture:
+Four decisions define it:
 
-  * **Modality fusion happens at the patch embedding (input level).** T1/T2/FLAIR
-    are co-registered voxel-for-voxel, so one patch location describes the same
-    tissue in all three; a projection that sees all three at once can learn the
-    cross-modal contrast of that tissue directly, which is the most information
-    a linear map can extract there. The alternative — one token stream per
-    modality — would triple the sequence length for a fusion the model then has
-    to relearn, and the sequence length is the binding constraint here (see
-    ``patch_size``). This mirrors ``CNNnnMamba``'s scratch stem, which likewise
-    fuses the three modalities in its first convolution.
-  * **The stream split happens after the patch embedding**, exactly as in
-    ``CNNnnMamba`` it happens after the CNN stem. The frequency view is an FFT of
-    the *learned patch features*, not of the raw voxels — so it describes how
-    learned features are distributed across spatial frequency, and so that the
-    ``streams`` ablation measures the same thing in both models and their numbers
-    stay comparable.
-  * **The two streams fuse *before* Mamba, not at the classifier.** They are
-    concatenated along the sequence axis so a single Mamba stack can relate them,
-    rather than being summarised independently and only meeting at the head. A
-    learned per-stream positional embedding is what keeps the two halves
-    distinguishable — and it doubles as the stream marker, so unlike
-    ``CNNnnMamba`` there is no separate ``stream_embed`` parameter.
-  * **Bidirectional scanning is on by default** (``bidirectional=True``). Mamba
-    is causal. In the two-stage model that is survivable because the CNN has
-    already given every token a wide receptive field, but here a token *is* its
-    patch and nothing else, so a forward-only scan would leave the first patches
-    of the flattened volume with no context at all. See ``BiMambaLayer``.
+  * **Modalities fuse at the patch embedding.** T1/T2/FLAIR are co-registered, so
+    one patch is the same tissue in all three and a projection that sees all
+    three learns its cross-modal contrast directly. One stream per modality would
+    triple the sequence — the binding constraint here.
+  * **The stream split happens after the patch embedding**, mirroring where
+    ``CNNnnMamba`` splits after its stem, so the ``streams`` ablation measures the
+    same thing in both models.
+  * **The two streams fuse before Mamba**, not at the classifier. The learned
+    per-stream position embedding doubles as the stream marker, so unlike
+    ``CNNnnMamba`` there is no separate ``stream_embed``. Position is learned
+    because flattening a 3D grid destroys adjacency — neighbours in z land N²
+    tokens apart.
+  * **Bidirectional scanning is on by default.** A token here *is* its patch with
+    no receptive field, so a causal forward-only scan would leave the first
+    patches with no context. Set ``bidirectional: false`` to match ``CNNnnMamba``.
 
-Positional information is a **learned** embedding over the patch grid rather than
-the implicit ordering Mamba's scan provides, because flattening a 3D grid to 1D
-destroys most spatial adjacency (voxel neighbours in z land N² tokens apart).
-``CNNnnMamba`` needs no equivalent — its convolutions encode locality.
-
-The main cost knob is ``patch_size``: it sets the sequence length as
-``(D/p)·(H/p)·(W/p)`` per stream. At the default 128³ input and ``patch_size=16``
-that is 512 tokens per stream, 1024 with both. Raise it to 32 (64 tokens/stream)
-if the pure-PyTorch Mamba fallback is too slow — its scan is an O(L) Python loop.
-
-Note this model concentrates a lot of its parameters in the patch projection
-(``3·p³·d_model``), so it is the more overfit-prone of the two on a few-hundred
-subject dataset; ``dropout`` and ``weight_decay`` matter more here than they do
-for the frozen-backbone two-stage model.
-
-Forward input  : ``(B, 3, D, H, W)`` — spatial modalities only, same as the
-                 two-stage model. The frequency view is derived inside.
-Forward output : ``(B, 1)`` raw logit.
+Forward: ``(B, 3, D, H, W)`` → ``(B, 1)`` raw logit. ``target_shape`` must be
+divisible by ``patch_size``; tokens per stream = ``(target_shape/patch_size)³``,
+which is the cost knob — see ``configs/nnmamba.yaml``.
 """
 
 from __future__ import annotations
@@ -80,9 +44,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .components.frequency import freq_magnitude
-from .components.mamba_block import make_mamba_layer
-from .components.streams import active_streams, resolve_stream_mode
+from ..components.frequency import freq_magnitude
+from ..components.mamba_block import make_mamba_layer
+from ..components.streams import active_streams, resolve_stream_mode
 
 
 def _gn(channels: int) -> nn.GroupNorm:

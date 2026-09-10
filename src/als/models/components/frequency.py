@@ -1,9 +1,9 @@
-"""3D FFT log-magnitude, used by the nnMamba model's frequency branch.
+"""
+3D FFT log-magnitude — the Mamba models' frequency view.
 
-This lives on the *model* side on purpose. The frequency view is taken of the
-CNN's feature map, not of the raw voxels, so it is part of the architecture and
-moves with the model — the dataset only ever hands over the three co-registered
-spatial modalities.
+This lives on the model side on purpose: the frequency view is taken of a
+learned feature map, not of the raw voxels, so it is part of the architecture.
+The dataset only ever hands over the three spatial modalities.
 """
 
 from __future__ import annotations

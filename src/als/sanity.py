@@ -1,10 +1,9 @@
-"""Pre-training sanity checks and a preflight summary (Goal 7).
+"""
+Pre-training sanity checks: one preflight summary before any real training.
 
-Before any real training the stages call ``preflight`` to print, in one place:
-dataset size and ALS/non-ALS balance, the train/val/test split counts, the
-device + GPU, the model's parameter count, and the shape of one real batch with
-a NaN/inf check on it. If the first batch is malformed you find out in seconds
-instead of mid-epoch.
+Prints dataset size and class balance, the split counts, device and GPU, the
+model's parameter count, and the shape of one real batch with a NaN/inf check —
+so a malformed batch shows up in seconds rather than mid-epoch.
 """
 
 from __future__ import annotations

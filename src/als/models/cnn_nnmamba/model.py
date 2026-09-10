@@ -1,61 +1,40 @@
 """
-End-to-end CNN→nnMamba classifier for ALS.
+End-to-end CNN → nnMamba classifier.
 
-Shape of the model:
-
-    (B, 3, D, H, W)                     three co-registered modalities, T1/T2/FLAIR
-        │
-    CNN stem  (pretrained MedicalNet ResNet, or the from-scratch conv trunk)
-        │
-    F  (B, d_model, d, h, w)            ONE feature map — no split yet
-        ├───────────────┐
-      spatial          FFT log-magnitude → 1×1×1 projection
-        │               │
-      pool→N tokens   pool→N tokens     (either stream can be switched off)
+    (B, 3, D, H, W)                 T1/T2/FLAIR, co-registered
+        │  CNN stem                 MedicalNet ResNet (shared across the three
+        ▼                           modalities) or a from-scratch conv trunk
+    F  (B, d_model, d, h, w)        ONE fused feature map — no split yet
+        ├──────────────┐
+     spatial view    FFT log-magnitude of F → 1×1×1 projection
+        │              │
+     pool → N tokens  pool → N tokens        N = token_grid³
         └──── concat along the SEQUENCE axis (+ learned stream embedding) ────┘
-        │
-    (B, 2N, d_model)  →  Mamba × L  →  LayerNorm  →  mean over tokens
-        │
-    (B, 1) raw logit
+        ▼
+    (B, 2N, d_model) → Mamba × L → LayerNorm → mean over tokens → (B, 1) logit
 
-Design notes:
+Four things worth knowing:
 
-  * **The split happens after the CNN, not before it.** An earlier version fed a
-    6-channel volume (3 spatial + 3 FFT-of-the-raw-voxels) into the network, and
-    the version after that gave the raw spectrum its own separate conv encoder.
-    Both asked a 3D convolution to make sense of a Fourier-magnitude *volume*,
-    which has no spatial locality for a conv kernel to exploit. Here the
-    convolutional work happens once, in the domain it is good at, and the
-    frequency view is taken of the resulting **feature map** — so it describes
-    how learned features are distributed across spatial frequencies, which is a
-    meaningful thing to hand a sequence model.
-  * **One Mamba over both streams.** The spatial and frequency tokens are
-    concatenated along the sequence axis with a learned per-stream embedding, so
-    a single Mamba stack can relate the two rather than each being summarised
-    independently and only met at the classifier. Note Mamba is causal: the
-    frequency tokens come second and therefore see the spatial ones, not the
-    other way round. The stream embedding is what keeps them distinguishable.
-  * **``streams`` selects which token streams reach the Mamba stack** —
-    ``"both"`` (default), ``"spatial"``, or ``"frequency"``. The CNN stem, the
-    Mamba stack, and the head are identical in all three, so the comparison is a
-    clean one-factor ablation: only the token sequence changes. The older boolean
-    ``use_frequency`` still works and maps to ``"both"`` / ``"spatial"``.
-  * **Optional transfer learning for the stem** (``spatial_encoder="pretrained"``).
-    Training a 3D conv stem from scratch on ~380 subjects is the dominant cause
-    of the train→test overfitting gap; the pretrained stem is a MedicalNet 3D
-    ResNet shared across the three modalities. ``"scratch"`` keeps the original
-    from-scratch trunk for the ablation.
-  * **GroupNorm, not BatchNorm** — training runs at batch size 2–4, where
-    BatchNorm statistics are unreliable.
-  * **Bounded sequence length.** Each branch is adaptive-pooled to ``token_grid³``
-    so the Mamba sequence is ``2·token_grid³`` regardless of input resolution.
-  * **Single logit + BCEWithLogitsLoss + pos_weight** (handled by the trainer),
-    matching the ViT so the two models are directly comparable.
+  * **The split happens after the CNN, not before it.** The frequency view is an
+    FFT of the *feature map*, so it describes how learned features spread across
+    spatial frequencies. Earlier versions took the FFT of the raw voxels, which
+    gives a 3D convolution no spatial locality to exploit.
+  * **One Mamba stack sees both streams**, concatenated along the sequence axis
+    with a learned per-stream embedding, so it can relate them rather than
+    summarising each separately. Mamba is causal, so spatial tokens come first
+    and the frequency tokens see them, not the reverse.
+  * **``streams``** picks which streams reach the stack — ``"both"`` (default),
+    ``"spatial"``, ``"frequency"``. Stem, Mamba and head are identical in all
+    three, so it is a clean one-factor ablation. The older ``use_frequency``
+    boolean still maps to ``"both"`` / ``"spatial"``.
+  * **``spatial_encoder="pretrained"``** starts the stem from MedicalNet weights
+    (frozen by default) — the main defence against overfitting a ~380-subject
+    cohort. ``"scratch"`` is the ablation. GroupNorm throughout, since batch size
+    is 2–4. Adaptive pooling bounds the sequence at ``2·token_grid³`` whatever
+    the input resolution.
 
-Forward input  : ``(B, 3, D, H, W)`` — spatial modalities only. The frequency
-                 view is derived inside the model, so the dataset no longer
-                 builds FFT channels.
-Forward output : ``(B, 1)`` raw logit.
+Forward: ``(B, 3, D, H, W)`` spatial modalities only → ``(B, 1)`` raw logit.
+The dataset never builds FFT channels; that happens here.
 """
 
 from __future__ import annotations
@@ -63,10 +42,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .components.cnn_backbone import backbone_forward_features, build_medicalnet_backbone
-from .components.frequency import freq_magnitude
-from .components.mamba_block import MambaLayer
-from .components.streams import active_streams, resolve_stream_mode
+from ..components.cnn_backbone import backbone_forward_features, build_medicalnet_backbone
+from ..components.frequency import freq_magnitude
+from ..components.mamba_block import MambaLayer
+from ..components.streams import active_streams, resolve_stream_mode
 
 
 def _gn(channels: int) -> nn.GroupNorm:

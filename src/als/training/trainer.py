@@ -1,22 +1,15 @@
-"""Model-agnostic training loop shared by the ViT and nnMamba stages.
+"""
+Model-agnostic training loop, shared by every training stage.
 
-The loop knows nothing about a specific model's input shape. Each stage passes a
-``forward_fn(model, batch, device) -> (logits, labels)`` adapter that moves its
-own batch to the device and returns ``(B, 1)`` logits + ``(B, 1)`` float labels.
-That single hook lets the tri-stream CNN (3 volume tensors), the ViT (one
-stacked feature tensor), and end-to-end nnMamba (one volume tensor) all reuse:
+Each stage passes a ``forward_fn(model, batch, device) -> (logits, labels)``
+adapter that moves its own batch to the device and returns ``(B, 1)`` logits and
+float labels. That one hook lets the tri-stream CNN (3 tensors), the ViT (one
+feature tensor) and the Mamba models (one volume) all share: AMP, optional MixUp
+on training batches, gradient accumulation, a CUDA-OOM guard that prints
+remedies, per-epoch GPU/RAM reporting, best-weights saving, and early stopping.
 
-  * AMP (bf16 default on CUDA; fp16 path uses a GradScaler),
-  * optional MixUp (``config.yaml`` → ``augmentations.mixup``), applied by the
-    adapter to *training* batches only, never to validation,
-  * gradient accumulation (raise it to keep the effective batch size while the
-    per-step memory drops — the main OOM lever besides batch size),
-  * a CUDA-OOM guard that prints concrete remedies instead of a bare traceback,
-  * per-epoch GPU/host-RAM reporting,
-  * best-weights saving (only when validation improves) and early stopping.
-
-There is deliberately no per-epoch checkpoint and no resume: only
-``<prefix>_best.pt`` is written, and only on a validation improvement.
+There is deliberately no per-epoch checkpoint and no resume — only
+``<prefix>_best.pt``, written when validation improves.
 """
 
 from __future__ import annotations

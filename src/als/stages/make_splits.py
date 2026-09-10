@@ -1,24 +1,18 @@
-"""Stage: inspect or re-freeze the cross-validation split.
+"""
+Stage: inspect or re-freeze the cross-validation split.
 
-The split lives in one file (``cross_validation.splits_file``, by default the
-project-root ``splits.json``). Once written it never changes on its own — every
-run, every stage, both models, and every ``--output-dir`` read that same file.
-That is what makes two independent experiments comparable: they are scored on
-the *identical* held-out test subjects, so a difference in their numbers is a
-difference in the models rather than in the luck of the draw.
+    python experiment.py --model <model> splits              # show the current split
+    python experiment.py --model <model> splits --reshuffle  # draw a new one, then freeze
+    python experiment.py --model <model> splits --reshuffle --seed 7
 
-    python experiment.py --model cnn_nnmamba splits              # show the current split
-    python experiment.py --model cnn_nnmamba splits --reshuffle  # draw a NEW split, then freeze it
-    python experiment.py --model cnn_nnmamba splits --reshuffle --seed 7   # a named split
+The split lives in one file (``cross_validation.splits_file``) and never changes
+on its own — every run, stage and model reads it, which is what makes two
+experiments comparable.
 
-Why ``--reshuffle`` needs a new seed: the generator is deterministic, so
-re-running it with the configured seed reproduces the *same* folds. Reshuffling
-therefore draws a fresh seed from system entropy and records it in the file, so
-the new split is itself reproducible — pass that seed back via ``--seed`` to
-recreate it exactly.
-
-This stage is model-independent (like ``preprocess``): running it under either
-``--model`` produces the same file.
+``--reshuffle`` draws a fresh seed from system entropy and records it in the
+file, because the generator is deterministic: re-running with the configured seed
+would reproduce the same folds. Pass that seed back with ``--seed`` to recreate a
+split exactly. Model-independent: either ``--model`` gives the same file.
 """
 
 from __future__ import annotations

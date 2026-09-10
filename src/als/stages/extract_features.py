@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from ..config import get
 from ..data.volume_dataset import VolumeDataset
-from ..models.cnn_encoder import ALSTriStreamClassifier
+from ..models.cnn_vit import ALSTriStreamClassifier
 from ..paths import DEFAULT_DATA_DIR, RunPaths
 from ..splits import n_folds_in, resolve_splits
 

@@ -1,25 +1,18 @@
 """
-Config-driven data-augmentation builder.
+Turns the ``augmentations`` section of the root ``config.yaml`` into the two
+MONAI ``Compose`` pipelines the dataset needs. No training code changes to add,
+remove or retune an augmentation — you edit ``config.yaml`` only, and any class
+in ``monai.transforms`` can be named there.
 
-The single source of truth for augmentations is the root ``config.yaml``
-(``augmentations:`` section). This module turns that config into the two MONAI
-``Compose`` pipelines the dataset needs, so **no training code has to change to
-add / remove / retune an augmentation** — you edit ``config.yaml`` only.
+Why two pipelines (not optional for co-registered multi-modal MRI):
 
-Why two pipelines (this split is not optional for multi-modal MRI):
-  * **geometric** — transforms that MOVE voxels (flip / affine / rotate / zoom).
-    They are applied ONCE to the stacked ``(3, D, H, W)`` volume so T1/T2/FLAIR
-    stay co-registered, and BEFORE the frequency (FFT) channels are computed.
-  * **intensity** — transforms that change voxel VALUES only (noise / contrast /
-    bias field / blur). Applied AFTER the frequency channels are computed so they
-    never corrupt the spectrum.
-Each config entry declares its ``group`` so the builder routes it correctly.
+  * **geometric** — moves voxels (flip / affine / rotate / zoom). Applied ONCE to
+    the stacked ``(3, D, H, W)`` volume so T1/T2/FLAIR stay aligned.
+  * **intensity** — changes voxel values only (noise / contrast / bias field /
+    blur). Applied after.
 
-Any class in ``monai.transforms`` can be named in the config — the builder looks
-it up by name — so new augmentations need no code here either.
-
-If MONAI is not installed the builder returns ``(None, None)`` and the dataset
-trains without augmentation (matches the previous behaviour).
+Each config entry declares its own ``group``. If MONAI is missing the builder
+returns ``(None, None)`` and the dataset trains unaugmented.
 """
 
 from __future__ import annotations

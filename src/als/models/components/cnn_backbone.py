@@ -1,22 +1,21 @@
 """
-3D CNN backbone (MONAI ResNet, MedicalNet-pretrained) for one MRI modality.
+3D CNN backbone: a MONAI ResNet with MedicalNet pretrained weights.
 
-Med3D / MedicalNet (Chen et al. 2019) pretrained 3D ResNets on 23 medical
-datasets including brain MRI. We expose ``resnet10`` and ``resnet50`` — the only
-two sizes for which the ``Warvito/MedicalNet-models`` torch.hub repo publishes
-the 23-dataset weights (there is no downloadable resnet18/34). ``resnet10`` is
-the smaller/lighter choice; ``resnet50`` the larger. Pick with the ``backbone``
-knob — the first lever to pull when the encoder runs the GPU out of memory.
+MedicalNet (Chen et al. 2019) pretrained 3D ResNets on 23 medical datasets
+including brain MRI. Only ``resnet10`` and ``resnet50`` are exposed — they are the
+only sizes the ``Warvito/MedicalNet-models`` hub repo publishes weights for
+(there is no resnet18/34). ``resnet10`` is the lighter choice and the first lever
+when the encoder runs the GPU out of memory.
 
-Contract:
-  * input  : ``(B, 1, D, H, W)`` z-scored single-modality volume
-  * forward : ``(B, feature_dim)`` global-average-pooled, projected embedding
-  * forward_features : ``(B, C', D', H', W')`` layer4 map (for the spatial ViT)
+  * input            : ``(B, 1, D, H, W)`` z-scored single-modality volume
+  * forward          : ``(B, feature_dim)`` pooled, projected embedding
+  * forward_features : ``(B, C', D', H', W')`` layer4 map (used by the ViT)
 
-The weight-loading and feature-map extraction are also exposed as standalone
-functions (``build_medicalnet_backbone`` / ``backbone_forward_features``) so the
-end-to-end CNN→nnMamba model can reuse the *same* MedicalNet transfer-learning
-path for its spatial stream without duplicating the (fiddly) hub/offline logic.
+Weight loading and feature extraction are also exposed as plain functions so the
+Mamba models reuse the same (fiddly) hub/offline path. Two environment variables
+control it: ``ALS_REQUIRE_PRETRAINED=1`` aborts instead of silently training
+random weights, and ``ALS_MEDICALNET_WEIGHTS=/path/to/file.pth`` loads from disk
+instead of downloading (see docs/setup.md).
 """
 
 from __future__ import annotations

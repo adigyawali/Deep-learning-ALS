@@ -1,9 +1,11 @@
-"""Config loading, CLI overrides, smoke-mode shrinking, and snapshotting.
+"""
+Config loading, CLI overrides, smoke-mode shrinking, and snapshotting.
 
-Configs live in ``configs/<model>.yaml`` and are plain nested dicts. The driver
-loads one, applies a few CLI overrides, optionally shrinks it for ``--smoke``,
-and saves the resolved result next to the run's outputs so every result is
-reproducible from the config that produced it (Goal 8).
+Model configs live in ``configs/<model>.yaml`` as plain nested dicts. The root
+``config.yaml`` owns augmentations and the CV splits for every model, and is
+merged over the model config here, so those two things have exactly one home.
+The resolved result is saved next to the run's outputs, so any result can be
+traced back to the config that produced it.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Any
 import yaml
 
 from .models.components.streams import resolve_stream_mode
+from .models.registry import hparam_section
 from .paths import PROJECT_ROOT
 
 CONFIG_DIR = PROJECT_ROOT / "configs"
@@ -54,11 +57,6 @@ def _merge_root_config(cfg: dict) -> None:
     cfg["_root_config_path"] = str(ROOT_CONFIG)
 
 
-def _train_section(cfg: dict) -> dict:
-    """The model-specific hyperparameter block ('vit'+'cnn' or 'nnmamba')."""
-    return cfg["cnn" if cfg["model"] == "cnn_vit" else "nnmamba"]
-
-
 def resolve_streams(cfg: dict) -> str:
     """Which Mamba token streams this config asks for: both / spatial / frequency.
 
@@ -75,7 +73,7 @@ def resolve_streams(cfg: dict) -> str:
 def apply_overrides(cfg: dict, *, batch_size=None, epochs=None, lr=None,
                     num_workers=None, target_shape=None) -> dict:
     """Apply the handful of CLI flags that override config values."""
-    sec = _train_section(cfg)
+    sec = hparam_section(cfg)
     if cfg["model"] == "cnn_vit":
         # batch/epochs/lr apply to BOTH cnn and vit sub-stages for convenience.
         for k, v in (("batch_size", batch_size), ("epochs", epochs)):

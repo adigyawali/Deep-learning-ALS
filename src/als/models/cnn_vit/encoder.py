@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .components.cnn_backbone import FEATURE_DIM, SingleModalityEncoder
+from ..components.cnn_backbone import FEATURE_DIM, SingleModalityEncoder
 
 
 class ALSTriStreamClassifier(nn.Module):

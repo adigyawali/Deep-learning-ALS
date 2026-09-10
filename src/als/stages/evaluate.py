@@ -1,19 +1,17 @@
-"""Stage: cross-validated evaluation of either model.
+"""
+Stage: cross-validated evaluation, identical for all three models.
 
-With 5-fold CV there are ``n_folds`` trained models (one per fold), plus one
-fixed, subject-level held-out TEST set shared by every fold. This stage:
+There are ``n_folds`` trained models plus one fixed held-out test set. This stage:
 
-  * scores each fold's best model on **its own validation fold** and aggregates
-    those into ``cv_summary.json`` (mean ± std over folds) — the cross-validated
-    estimate of generalization;
-  * scores each fold's model on the **shared TEST set** and reports both the
-    per-fold spread (mean ± std) and a **mean-probability ensemble** of the five
-    models in ``test_evaluation.json`` — the headline held-out number.
+  * scores each fold's model on its OWN validation fold and pools every
+    out-of-fold prediction into ``cv_summary.json`` (the pooled-OOF numbers are
+    the stable ones; per-fold mean ± std is kept for the spread);
+  * scores each fold's model on the SHARED test set and reports both the per-fold
+    spread and a mean-probability ensemble in ``test_evaluation.json`` — the
+    headline number.
 
-Every operating threshold is the val-tuned one stored in each fold's checkpoint
-(the ensemble uses the mean of the five), so no threshold is ever chosen on the
-test data it scores. Both models write the same schema so CNN→ViT and
-CNN→nnMamba are compared apples-to-apples (Goal 8).
+Every operating threshold comes from validation data, never from the test set it
+scores. All models write the same schema so they are directly comparable.
 """
 
 from __future__ import annotations

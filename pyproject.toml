@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "als-multimodal"
 version = "0.2.0"
-description = "Multi-modal 3D MRI ALS classification with interchangeable CNN→ViT and CNN→nnMamba models."
+description = "Multi-modal 3D MRI ALS classification with interchangeable CNN→ViT, CNN→nnMamba and one-stage nnMamba models."
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [

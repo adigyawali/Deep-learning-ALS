@@ -1,21 +1,20 @@
-"""Which token streams a Mamba stack sees: spatial, frequency, or both.
+"""
+Which token streams a Mamba stack sees: spatial, frequency, or both.
 
-Both Mamba models (``CNNnnMamba`` and the one-stage ``NNMamba``) build the same
-two token streams — a *spatial* view of a feature map and an FFT log-magnitude
-*frequency* view of that same map — and concatenate them into one sequence. This
-module owns the single vocabulary for choosing between them so the two models,
-the configs, and the CLI all mean exactly the same thing by ``"spatial"``.
+Both Mamba models build the same two token streams — a spatial view of a feature
+map and an FFT log-magnitude view of that same map — and concatenate them into
+one sequence. This module owns the vocabulary, so the models, the configs and the
+CLI cannot disagree about what ``"spatial"`` means.
 
-The three modes are a one-factor ablation: stem, Mamba stack, and classifier head
-are identical in all three, and only the token sequence handed to Mamba changes.
+The three modes are a one-factor ablation: stem, Mamba stack and head are
+identical in all three; only the token sequence changes.
 
-  * ``"both"``      — spatial tokens then frequency tokens (the default).
+  * ``"both"``      — spatial tokens then frequency tokens (default).
   * ``"spatial"``   — spatial tokens only.
   * ``"frequency"`` — frequency tokens only.
 
-``use_frequency`` is the older boolean this replaced; it is still accepted and
-maps to ``both`` / ``spatial``, so pre-existing configs and checkpoints keep
-their original meaning.
+``use_frequency`` is the older boolean; it still maps to ``both`` / ``spatial``
+so existing configs and checkpoints keep their meaning.
 """
 
 from __future__ import annotations

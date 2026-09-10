@@ -1,32 +1,26 @@
 """
-Unified per-subject 3D volume dataset.
+Per-subject 3D volume dataset — the one loader both model families use.
 
-Both models consume the *same* preprocessed MNI-space volumes from
-``Data/processed/<sample_id>/`` (so preprocessing is comparable, Goal 8). One
-class serves three consumers via ``return_mode``:
+Reads the preprocessed MNI-space volumes from ``Data/processed/<sample_id>/``
+and serves them two ways via ``return_mode``:
 
-  * ``"tuple"``  → ``((t1, t2, flair), label)`` with each modality ``(1,D,H,W)``
-                   — the tri-stream CNN encoder and feature extraction.
-  * ``"stack"``  → ``(volume, label)`` with ``volume`` ``(3,D,H,W)``
-                   — end-to-end nnMamba.
+  * ``"tuple"`` → ``((t1, t2, flair), label)``, each ``(1,D,H,W)`` — the
+    tri-stream CNN and feature extraction.
+  * ``"stack"`` → ``(volume, label)`` with ``volume`` ``(3,D,H,W)`` — the Mamba
+    models.
 
-Both modes hand over the three spatial modalities and nothing else. The nnMamba
-frequency stream is **not** built here: it is derived inside the model from the
-CNN feature map (``models/cnn_nnmamba.py``) or the patch embedding
-(``models/nnmamba.py``), so this dataset has no ``streams`` switch and never
-returns 6 channels.
+Either way it hands over the three spatial modalities and nothing else: the
+frequency stream is derived inside the model, so there is no ``streams`` switch
+here and it never returns 6 channels.
 
-Multi-modal registration is sacred: T1/T2/FLAIR are co-registered, so any
-geometric augmentation is sampled ONCE and applied identically to all three.
-Augmentation is still split into a *geometric* group (flip/affine, shared across
-channels) and an *intensity* group (noise/contrast), because that ordering keeps
-the modalities aligned; both now apply to the same 3-channel volume.
+Per volume: z-score over foreground voxels → trilinear resize to
+``target_shape`` → stack as channels.
 
-Which augmentations run, and with what parameters, is **not** decided here: it
-comes from the ``augmentations`` section of the root ``config.yaml`` (passed in
-as ``aug_config``) and is turned into the two Compose pipelines by
-``als.data.augment.build_transforms``. Pass ``aug_config=None`` to fall back to a
-named preset via ``aug_level`` (the older behaviour).
+Augmentation (training data only) comes from the ``augmentations`` section of the
+root ``config.yaml`` via ``augment.build_transforms``. Geometric transforms are
+sampled ONCE for the stacked volume so the co-registered modalities stay aligned;
+intensity transforms run after. Pass ``aug_config=None`` to fall back to an
+``aug_level`` preset.
 """
 
 from __future__ import annotations

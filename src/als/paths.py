@@ -1,33 +1,21 @@
-"""Canonical filesystem layout for data, splits, checkpoints, and results.
+"""
+Canonical filesystem layout for data, splits, checkpoints and results.
 
-Everything a run produces lives under one ``runs/<model>/`` tree so it is easy
-to see where outputs, logs, and checkpoints went, and the ``splits.json`` is
-shared at ``runs/splits.json`` so both models train/eval on the same subjects.
+Everything a run produces lives under ``runs/<model>/``, and ``splits.json`` is
+shared so every model trains and is scored on the same subjects.
 
-    Data/processed/                 # one folder per subject-visit (preprocessing output)
+    Data/processed/                 one folder per subject-timepoint
     runs/
-      splits.json                   # SHARED split: held-out test + 5 CV folds
-      cnn_vit/
-        config.json                 # resolved config snapshot for this run
-        metrics/                    # cv_summary.json, test_evaluation.json, predictions.json
-        fold0/                      # one such tree per CV fold
-          checkpoints/              # cnn_best.pt, vit_best.pt  (best weights only)
-          features/                 # <id>_spatial.pt  (fold-k CNN layer4 maps)
-          metrics/                  # cnn_train_history.json, vit_train_history.json
+      splits.json                   the SHARED split: held-out test + CV folds
+      <model>/
+        config.json                 resolved config for this run
+        metrics/                    cv_summary.json, test_evaluation.json,
+                                    predictions.json  (aggregated across folds)
+        fold0/ ... fold4/
+          checkpoints/              <prefix>_best.pt  (best weights only)
+          features/                 <id>_spatial.pt   (cnn_vit only)
+          metrics/                  <prefix>_train_history.json
           logs/
-        fold1/ ... fold4/
-      cnn_nnmamba/
-        config.json
-        metrics/                    # cv_summary.json, test_evaluation.json, predictions.json
-        fold0/ ... fold4/
-          checkpoints/              # nnmamba_best.pt  (best weights only)
-          metrics/  logs/
-      nnmamba/                      # one-stage Mamba (no CNN); same tree as above
-        config.json
-        metrics/
-        fold0/ ... fold4/
-          checkpoints/              # nnmamba_best.pt
-          metrics/  logs/
 """
 
 from __future__ import annotations
@@ -35,11 +23,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models.registry import MODELS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = PROJECT_ROOT / "Data" / "processed"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "runs"
-
-MODELS = ("cnn_vit", "cnn_nnmamba", "nnmamba")
 
 
 @dataclass(frozen=True)

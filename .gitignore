@@ -1,18 +1,20 @@
-.DS_Store
-/Data/
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 .venv/
 venv/
 .env
 .pytest_cache/
-.claude/
-*.egg-info/
+
+# Data and run outputs (never committed — see docs/data.md)
+/Data/
 runs/
-**/checkpoints/
+splits.json
 *.pt
 *.pth
-splits.json
-Instructions.md
 
+# Editor / OS / tooling
+.DS_Store
+.claude/

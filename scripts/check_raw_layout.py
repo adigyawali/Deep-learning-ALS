@@ -1,20 +1,18 @@
 """
 Read-only diagnostic: how does the preprocessing parser see Data/raw?
 
-Run this before a long preprocessing job, and any time a new cohort or a new
-export convention shows up. It uses the *same* folder search and the *same*
-modality regexes as the real pipeline, so if a file is listed as UNMATCHED here
-it will be silently skipped by preprocessing too.
+Run it before a long preprocessing job, and whenever a new cohort or export
+convention shows up. It uses the same folder search and the same modality regexes
+as the real pipeline, so a file listed as UNMATCHED here will be silently skipped
+by preprocessing too.
 
     python scripts/check_raw_layout.py                 # Data/raw
     python scripts/check_raw_layout.py /path/to/raw
 
-For each modality it prints which folder was chosen, the distinct modality
-tokens found (e.g. T1w10, PDT2, FLAIR3D), which cohorts and timepoint forms are
-present, and every filename the parser could not read. It then runs the real
-pairing and prints the triplet count.
-
-Nothing is written or modified.
+Prints, per modality: the folder chosen, the modality tokens found, the cohorts
+and timepoint forms present, and every filename it could not read. Then runs the
+real pairing and reports the triplet count, the subject/sample class balance, and
+whether site stratification will engage. Nothing is written or modified.
 """
 
 from __future__ import annotations

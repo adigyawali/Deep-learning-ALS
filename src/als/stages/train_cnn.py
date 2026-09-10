@@ -10,7 +10,7 @@ from .. import sanity
 from ..config import get
 from ..data.mixup import build_mixup
 from ..data.volume_dataset import VolumeDataset
-from ..models.cnn_encoder import ALSTriStreamClassifier
+from ..models.cnn_vit import ALSTriStreamClassifier
 from ..paths import DEFAULT_DATA_DIR, RunPaths
 from ..splits import indices_from_split, n_folds_in, resolve_splits
 from ..training import trainer

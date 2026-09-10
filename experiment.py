@@ -1,34 +1,28 @@
 """
-Unified ALS pipeline driver.
-
-Pick a model with ``--model`` and run the whole pipeline (or named stages):
+Unified pipeline driver — pick a model, run the whole pipeline or named stages.
 
     python experiment.py --model cnn_vit                 # full CNN→ViT pipeline
     python experiment.py --model cnn_nnmamba             # full CNN→nnMamba pipeline
     python experiment.py --model nnmamba                 # one-stage Mamba, no CNN
     python experiment.py --model cnn_nnmamba --smoke     # tiny end-to-end wiring check
-    python experiment.py --model cnn_vit train_vit evaluate   # just these stages
+    python experiment.py --model cnn_vit train_vit evaluate      # just these stages
 
 Models:
-  cnn_vit     : two-stage — tri-stream 3D CNN, then a ViT over its feature maps.
-  cnn_nnmamba : two-stage — one CNN stem, then a Mamba over spatial+frequency tokens.
-  nnmamba     : ONE stage — 3D patch embedding straight into Mamba, no CNN at all.
+  cnn_vit     : tri-stream 3D CNN, then a ViT over its feature maps (two stages).
+  cnn_nnmamba : one CNN stem, then a Mamba over spatial+frequency tokens.
+  nnmamba     : 3D patch embedding straight into Mamba — no CNN.
 
-Stages:
+Stages, in order:
   cnn_vit     : preprocess splits train_cnn extract_features train_vit evaluate gradcam
   cnn_nnmamba : preprocess splits train_nnmamba evaluate
   nnmamba     : preprocess splits train_nnmamba evaluate
 
-The CV split is frozen in one file and reused by every run, so two experiments
-are always scored on the identical held-out test set. Inspect or re-draw it:
-
-    python experiment.py --model cnn_nnmamba splits              # show it
-    python experiment.py --model cnn_nnmamba splits --reshuffle  # draw a new one
-
-``all`` (the default) runs every stage for the chosen model except gradcam.
-Every stage is idempotent where outputs already exist. Training saves only the
-best-validation weights (``runs/<model>/checkpoints/<prefix>_best.pt``); there
-is no per-epoch checkpoint and no resume, so a crashed run must be restarted.
+``all`` (the default) runs the stages listed for that model. Which models exist
+and which stages each one runs is defined in ``als/models/registry.py``. The CV split is frozen in
+one file and reused by every run, so experiments are always scored on the
+identical test set — inspect it with the ``splits`` stage. Training saves only
+the best-validation weights per fold; there is no resume, so a crashed run
+restarts from the beginning.
 """
 
 from __future__ import annotations
@@ -40,25 +34,13 @@ import sys
 from pathlib import Path
 
 # Make ``als`` importable when run straight from a checkout (no install needed),
-# in addition to the editable install documented in Instructions.md.
+# in addition to the editable install documented in docs/setup.md.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from als import config as cfgmod  # noqa: E402
+from als.models.registry import MODELS, spec  # noqa: E402
 from als.paths import build_run_paths  # noqa: E402
 from als.seed import resolve_device, set_seed  # noqa: E402
-
-STAGE_ORDER = {
-    "cnn_vit": ["preprocess", "splits", "train_cnn", "extract_features", "train_vit", "evaluate"],
-    "cnn_nnmamba": ["preprocess", "splits", "train_nnmamba", "evaluate"],
-    # Same stage list as cnn_nnmamba: the one-stage model differs only in the
-    # module the train_nnmamba stage builds, not in the pipeline around it.
-    "nnmamba": ["preprocess", "splits", "train_nnmamba", "evaluate"],
-}
-ALL_STAGES = {
-    "cnn_vit": STAGE_ORDER["cnn_vit"] + ["gradcam"],
-    "cnn_nnmamba": STAGE_ORDER["cnn_nnmamba"],
-    "nnmamba": STAGE_ORDER["nnmamba"],
-}
 
 
 def _run_preprocess(args) -> int:
@@ -74,7 +56,7 @@ def _run_preprocess(args) -> int:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unified ALS pipeline driver.")
-    p.add_argument("--model", required=True, choices=["cnn_vit", "cnn_nnmamba", "nnmamba"])
+    p.add_argument("--model", required=True, choices=list(MODELS))
     p.add_argument("stages", nargs="*", default=["all"],
                    help="Stage names or 'all' (default). See module docstring.")
     p.add_argument("--config", type=str, default=None, help="Override configs/<model>.yaml.")
@@ -113,9 +95,10 @@ def main() -> int:
     args = parse_args()
     model = args.model
 
+    model_spec = spec(model)
     requested = args.stages if args.stages and args.stages != ["all"] else None
-    stages = requested if requested else ALL_STAGES[model]
-    valid = set(STAGE_ORDER[model] + ["gradcam"])
+    stages = requested if requested else model_spec.default_stages
+    valid = model_spec.valid_stages
     bad = [s for s in stages if s not in valid]
     if bad:
         print(f"Unknown stage(s) for {model}: {bad}. Valid: {sorted(valid)}", file=sys.stderr)
